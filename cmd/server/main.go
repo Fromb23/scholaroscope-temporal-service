@@ -10,6 +10,7 @@ import (
 	"scholaroscope-temporal-service/internal/calendar"
 	"scholaroscope-temporal-service/internal/conflict"
 	"scholaroscope-temporal-service/internal/db"
+	"scholaroscope-temporal-service/internal/events"
 	"scholaroscope-temporal-service/internal/scheduling"
 )
 
@@ -44,6 +45,7 @@ func main() {
 	schedulingHandler   := scheduling.NewHandler(schedulingService)
 	availabilityHandler := availability.NewHandler(availabilityRepo)
 	conflictHandler     := conflict.NewHandler(conflictRepo)
+	eventHandler        := events.NewHandler(calendarService, schedulingService, availabilityRepo)
 
 	mux := http.NewServeMux()
 
@@ -66,6 +68,13 @@ func main() {
 	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/conflicts",   conflictHandler.ListUnresolved)
 	mux.HandleFunc("POST /orgs/{orgId}/conflicts/{conflictId}/resolve",  conflictHandler.Resolve)
 	mux.HandleFunc("GET /orgs/{orgId}/conflicts/summary",                conflictHandler.Summary)
+
+	// Kernel event webhook routes
+	mux.HandleFunc("POST /events/session.created",      eventHandler.OnSessionCreated)
+	mux.HandleFunc("POST /events/session.deleted",      eventHandler.OnSessionDeleted)
+	mux.HandleFunc("POST /events/teacher.assigned",     eventHandler.OnTeacherAssigned)
+	mux.HandleFunc("POST /events/teacher.unassigned",   eventHandler.OnTeacherUnassigned)
+	mux.HandleFunc("POST /events/org.calendar.updated", eventHandler.OnOrgCalendarUpdated)
 
 	log.Printf("temporal service: listening on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, mux); err != nil {

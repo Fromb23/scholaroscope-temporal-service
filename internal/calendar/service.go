@@ -126,3 +126,8 @@ func resolveSlotType(start, end time.Time, breaks []BreakWindow) SlotType {
 	}
 	return SlotTypeLesson
 }
+
+// GetSlotsForVersion exposes slot retrieval for event handlers.
+func (s *Service) GetSlotsForVersion(ctx context.Context, calendarVersionID uuid.UUID) ([]TimeSlot, error) {
+	return s.repo.GetTimeSlotsForVersion(ctx, calendarVersionID)
+}
