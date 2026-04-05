@@ -17,7 +17,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 }
 
 // GetLessonSlotsForVersion returns all LESSON slots for a calendar version,
-// ordered by day and slot index. The engine iterates these to find placements.
+// ordered by day and slot index.
 func (r *Repo) GetLessonSlotsForVersion(ctx context.Context, calendarVersionID uuid.UUID) ([]SlotCandidate, error) {
 	query := `
 		SELECT id, day_of_week, slot_index, slot_type
@@ -44,7 +44,7 @@ func (r *Repo) GetLessonSlotsForVersion(ctx context.Context, calendarVersionID u
 }
 
 // GetConsecutiveSlots returns N consecutive LESSON slots starting from a given
-// day and slot index. Used to validate contiguity for multi-slot sessions.
+// day and slot index.
 func (r *Repo) GetConsecutiveSlots(ctx context.Context, calendarVersionID uuid.UUID, dayOfWeek, startSlotIndex, count int16) ([]SlotCandidate, error) {
 	query := `
 		SELECT id, day_of_week, slot_index, slot_type
@@ -78,17 +78,15 @@ func (r *Repo) GetConsecutiveSlots(ctx context.Context, calendarVersionID uuid.U
 	return slots, rows.Err()
 }
 
-// ScheduleSession writes scheduled_session + slot_occupancy rows atomically.
-// If the UNIQUE constraints on slot_occupancy are violated the tx rolls back
-// and the caller logs a conflict.
-func (r *Repo) ScheduleSession(ctx context.Context, ss *ScheduledSession, occupancies []SlotOccupancy) error {
+// ScheduleSession writes scheduled_session + slot_occupancy atomically,
+// then re-fetches the persisted row so timestamps are DB-accurate.
+func (r *Repo) ScheduleSession(ctx context.Context, ss *ScheduledSession, occupancies []SlotOccupancy) (*ScheduledSession, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("scheduling repo: begin tx: %w", err)
+		return nil, fmt.Errorf("scheduling repo: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Insert scheduled_session
 	_, err = tx.Exec(ctx, `
 		INSERT INTO scheduled_session (
 			id, org_id, session_id, calendar_version_id,
@@ -107,10 +105,9 @@ func (r *Repo) ScheduleSession(ctx context.Context, ss *ScheduledSession, occupa
 		ss.IsPinned,
 	)
 	if err != nil {
-		return fmt.Errorf("scheduling repo: insert scheduled_session: %w", err)
+		return nil, fmt.Errorf("scheduling repo: insert scheduled_session: %w", err)
 	}
 
-	// Insert one slot_occupancy row per slot in duration
 	for _, o := range occupancies {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO slot_occupancy (
@@ -127,11 +124,16 @@ func (r *Repo) ScheduleSession(ctx context.Context, ss *ScheduledSession, occupa
 			o.CohortSubjectID,
 		)
 		if err != nil {
-			return fmt.Errorf("scheduling repo: insert slot_occupancy: %w", err)
+			return nil, fmt.Errorf("scheduling repo: insert slot_occupancy: %w", err)
 		}
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("scheduling repo: commit: %w", err)
+	}
+
+	// Re-fetch after commit so scheduled_at and updated_at are DB-accurate
+	return r.GetScheduledSession(ctx, ss.SessionID)
 }
 
 // GetScheduledSession returns a scheduled session by kernel session ID.
