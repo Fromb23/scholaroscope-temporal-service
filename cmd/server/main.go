@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"scholaroscope-temporal-service/config"
+	"scholaroscope-temporal-service/internal/availability"
 	"scholaroscope-temporal-service/internal/calendar"
 	"scholaroscope-temporal-service/internal/conflict"
 	"scholaroscope-temporal-service/internal/db"
@@ -29,30 +30,36 @@ func main() {
 	log.Println("temporal service: db connected")
 
 	// Repos
-	calendarRepo := calendar.NewRepo(pool)
-	conflictRepo := conflict.NewRepo(pool)
-	schedulingRepo := scheduling.NewRepo(pool)
+	calendarRepo      := calendar.NewRepo(pool)
+	conflictRepo      := conflict.NewRepo(pool)
+	schedulingRepo    := scheduling.NewRepo(pool)
+	availabilityRepo  := availability.NewRepo(pool)
 
 	// Services
-	calendarService := calendar.NewService(calendarRepo)
-	schedulingService := scheduling.NewService(schedulingRepo, conflictRepo)
+	calendarService   := calendar.NewService(calendarRepo)
+	schedulingService := scheduling.NewService(schedulingRepo, conflictRepo, availabilityRepo)
 
 	// Handlers
-	calendarHandler := calendar.NewHandler(calendarService)
-	schedulingHandler := scheduling.NewHandler(schedulingService)
+	calendarHandler     := calendar.NewHandler(calendarService)
+	schedulingHandler   := scheduling.NewHandler(schedulingService)
+	availabilityHandler := availability.NewHandler(availabilityRepo)
 
 	mux := http.NewServeMux()
 
 	// Calendar routes
-	mux.HandleFunc("POST /orgs/{orgId}/calendar", calendarHandler.CreateCalendar)
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/active", calendarHandler.GetActiveCalendar)
-	mux.HandleFunc("POST /orgs/{orgId}/calendar/{versionId}/activate", calendarHandler.ActivateCalendar)
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/slots", calendarHandler.GetTimeSlots)
+	mux.HandleFunc("POST /orgs/{orgId}/calendar",                          calendarHandler.CreateCalendar)
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/active",                    calendarHandler.GetActiveCalendar)
+	mux.HandleFunc("POST /orgs/{orgId}/calendar/{versionId}/activate",     calendarHandler.ActivateCalendar)
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/slots",         calendarHandler.GetTimeSlots)
 
 	// Scheduling routes
-	mux.HandleFunc("POST /orgs/{orgId}/sessions/{sessionId}/schedule", schedulingHandler.ScheduleSession)
-	mux.HandleFunc("DELETE /orgs/{orgId}/sessions/{sessionId}/schedule", schedulingHandler.UnscheduleSession)
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/timetable", schedulingHandler.GetTimetable)
+	mux.HandleFunc("POST /orgs/{orgId}/sessions/{sessionId}/schedule",     schedulingHandler.ScheduleSession)
+	mux.HandleFunc("DELETE /orgs/{orgId}/sessions/{sessionId}/schedule",   schedulingHandler.UnscheduleSession)
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/timetable",     schedulingHandler.GetTimetable)
+
+	// Availability routes
+	mux.HandleFunc("PUT /orgs/{orgId}/teachers/{teacherId}/availability",  availabilityHandler.SetAvailability)
+	mux.HandleFunc("GET /orgs/{orgId}/teachers/{teacherId}/availability",  availabilityHandler.GetAvailability)
 
 	log.Printf("temporal service: listening on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, mux); err != nil {

@@ -4,30 +4,48 @@ import (
 	"context"
 	"fmt"
 
+	"scholaroscope-temporal-service/internal/availability"
 	"scholaroscope-temporal-service/internal/conflict"
 
 	"github.com/google/uuid"
 )
 
 type Service struct {
-	repo         *Repo
-	conflictRepo *conflict.Repo
+	repo             *Repo
+	conflictRepo     *conflict.Repo
+	availabilityRepo *availability.Repo
 }
 
-func NewService(repo *Repo, conflictRepo *conflict.Repo) *Service {
-	return &Service{repo: repo, conflictRepo: conflictRepo}
+func NewService(repo *Repo, conflictRepo *conflict.Repo, availabilityRepo *availability.Repo) *Service {
+	return &Service{
+		repo:             repo,
+		conflictRepo:     conflictRepo,
+		availabilityRepo: availabilityRepo,
+	}
 }
 
 // Schedule attempts to place a session into the first valid slot.
+// Checks teacher availability before attempting each placement.
 // On success: writes scheduled_session + slot_occupancy atomically.
-// On failure: logs a scheduling_conflict and returns the conflict type.
+// On failure: logs a scheduling_conflict and returns an error.
 func (s *Service) Schedule(ctx context.Context, req *ScheduleRequest) (*ScheduledSession, error) {
+	// Build unavailability exclusion set upfront — one query, O(1) lookups
+	unavailable, err := s.availabilityRepo.GetUnavailableSlots(ctx, req.OrgID, req.TeacherID)
+	if err != nil {
+		return nil, fmt.Errorf("scheduling service: get unavailable slots: %w", err)
+	}
+
 	candidates, err := s.repo.GetLessonSlotsForVersion(ctx, req.CalendarVersionID)
 	if err != nil {
 		return nil, fmt.Errorf("scheduling service: get candidates: %w", err)
 	}
 
 	for _, candidate := range candidates {
+		// Hard constraint: teacher must be available for this slot
+		if _, blocked := unavailable[candidate.ID]; blocked {
+			continue
+		}
+
 		// Validate contiguity for multi-slot sessions
 		slots, err := s.repo.GetConsecutiveSlots(ctx,
 			req.CalendarVersionID,
@@ -39,8 +57,20 @@ func (s *Service) Schedule(ctx context.Context, req *ScheduleRequest) (*Schedule
 			return nil, fmt.Errorf("scheduling service: get consecutive slots: %w", err)
 		}
 
-		// Not enough contiguous LESSON slots available from this position
+		// Not enough contiguous LESSON slots from this position
 		if int16(len(slots)) < req.DurationSlots {
+			continue
+		}
+
+		// For multi-slot: check all slots in duration are available for teacher
+		allAvailable := true
+		for _, sl := range slots[1:] { // first slot already checked above
+			if _, blocked := unavailable[sl.ID]; blocked {
+				allAvailable = false
+				break
+			}
+		}
+		if !allAvailable {
 			continue
 		}
 
@@ -82,11 +112,12 @@ func (s *Service) Schedule(ctx context.Context, req *ScheduleRequest) (*Schedule
 	}
 
 	// No valid slot found — log conflict
+	conflictType := conflict.ConflictNoValidSlot
 	s.conflictRepo.Log(ctx, &conflict.SchedulingConflict{
 		OrgID:             req.OrgID,
 		CalendarVersionID: req.CalendarVersionID,
 		SessionID:         req.SessionID,
-		ConflictType:      conflict.ConflictNoValidSlot,
+		ConflictType:      conflictType,
 		Description: fmt.Sprintf(
 			"no valid slot found for session %s (teacher: %s, cohort_subject: %s, duration: %d)",
 			req.SessionID, req.TeacherID, req.CohortSubjectID, req.DurationSlots,
