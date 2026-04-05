@@ -85,3 +85,31 @@ func (r *Repo) MarkResolved(ctx context.Context, conflictID uuid.UUID) error {
 	}
 	return nil
 }
+
+// SummaryByType returns unresolved conflict counts grouped by conflict_type for an org.
+func (r *Repo) SummaryByType(ctx context.Context, orgID uuid.UUID) (map[string]int, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT conflict_type, COUNT(*) AS total
+		FROM scheduling_conflict
+		WHERE org_id   = $1
+		  AND resolved = FALSE
+		GROUP BY conflict_type
+		ORDER BY total DESC`,
+		orgID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("conflict repo: summary by type: %w", err)
+	}
+	defer rows.Close()
+
+	summary := make(map[string]int)
+	for rows.Next() {
+		var conflictType string
+		var total int
+		if err := rows.Scan(&conflictType, &total); err != nil {
+			return nil, fmt.Errorf("conflict repo: scan summary: %w", err)
+		}
+		summary[conflictType] = total
+	}
+	return summary, rows.Err()
+}
