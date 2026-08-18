@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"scholaroscope-temporal-service/config"
 	"scholaroscope-temporal-service/internal/availability"
@@ -11,6 +12,8 @@ import (
 	"scholaroscope-temporal-service/internal/conflict"
 	"scholaroscope-temporal-service/internal/db"
 	"scholaroscope-temporal-service/internal/events"
+	"scholaroscope-temporal-service/internal/launch"
+	"scholaroscope-temporal-service/internal/provisioning"
 	"scholaroscope-temporal-service/internal/scheduling"
 )
 
@@ -35,6 +38,8 @@ func main() {
 	conflictRepo     := conflict.NewRepo(pool)
 	schedulingRepo   := scheduling.NewRepo(pool)
 	availabilityRepo := availability.NewRepo(pool)
+	provisioningRepo := provisioning.NewRepo(pool)
+	launchRepo       := launch.NewRepo(pool)
 
 	// Services
 	calendarService   := calendar.NewService(calendarRepo)
@@ -46,6 +51,16 @@ func main() {
 	availabilityHandler := availability.NewHandler(availabilityRepo)
 	conflictHandler     := conflict.NewHandler(conflictRepo)
 	eventHandler        := events.NewHandler(calendarService, schedulingService, availabilityRepo)
+	provisioningHandler := provisioning.NewHandler(
+		provisioningRepo,
+		cfg.ScholaroscopeWebhookSecret,
+		cfg.ScholaroscopeAllowedTimestamp,
+	)
+	launchHandler := launch.NewHandler(
+		launchRepo,
+		cfg.ScholaroscopeWebhookSecret,
+		5*time.Minute,
+	)
 
 	mux := http.NewServeMux()
 
@@ -70,6 +85,10 @@ func main() {
 	mux.HandleFunc("GET /orgs/{orgId}/conflicts/summary",                conflictHandler.Summary)
 
 	// Kernel event webhook routes
+	mux.HandleFunc("POST /integration/scholaroscope/events", provisioningHandler.HandleScholaroscopeEvent)
+	mux.HandleFunc("POST /portal/launch/exchange", launchHandler.Exchange)
+	mux.HandleFunc("GET /portal/session", launchHandler.Session)
+	mux.HandleFunc("POST /portal/logout", launchHandler.Logout)
 	mux.HandleFunc("POST /events/session.created",      eventHandler.OnSessionCreated)
 	mux.HandleFunc("POST /events/session.deleted",      eventHandler.OnSessionDeleted)
 	mux.HandleFunc("POST /events/teacher.assigned",     eventHandler.OnTeacherAssigned)
