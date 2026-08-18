@@ -89,6 +89,11 @@ func SignBody(secret, timestamp string, body []byte) string {
 	return Algorithm + "=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+func PayloadHash(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
 func VerifySignature(secret, timestamp string, body []byte, signature string) error {
 	expected := SignBody(secret, timestamp, body)
 	if !hmac.Equal([]byte(expected), []byte(signature)) {
