@@ -18,7 +18,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
-func (r *Repo) ConsumeGrant(ctx context.Context, payload GrantPayload, payloadHash string) (*PortalSession, error) {
+func (r *Repo) ConsumeGrant(ctx context.Context, payload GrantPayload, payloadHash string, sessionExpiresAt time.Time) (*PortalSession, error) {
 	workspaceID, err := uuid.Parse(payload.WorkspaceUUID)
 	if err != nil {
 		return nil, err
@@ -121,7 +121,7 @@ func (r *Repo) ConsumeGrant(ctx context.Context, payload GrantPayload, payloadHa
 		grantID,
 		payload.PermissionSnapshot,
 		payload.Purpose,
-		expiresAt,
+		sessionExpiresAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("launch repo: insert portal session: %w", err)
@@ -134,20 +134,33 @@ func (r *Repo) ConsumeGrant(ctx context.Context, payload GrantPayload, payloadHa
 		WorkspaceID:    workspaceID,
 		InstallationID: installationID,
 		ActorID:        actorID,
-		ExpiresAt:      expiresAt,
+		PermissionSnapshot: payload.PermissionSnapshot,
+		ExpiresAt:      sessionExpiresAt,
 	}, nil
 }
 
 func (r *Repo) GetSession(ctx context.Context, sessionID uuid.UUID) (*PortalSession, error) {
 	var session PortalSession
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, workspace_id, installation_id, actor_id, expires_at
-		FROM portal_session
-		WHERE id = $1
-		  AND revoked_at IS NULL
-		  AND expires_at > now()`,
+		SELECT ps.id, ps.workspace_id, ps.installation_id, ps.actor_id,
+		       ps.permission_snapshot, ps.expires_at
+		FROM portal_session ps
+		JOIN integration_installation ii ON ii.id = ps.installation_id
+		JOIN external_workspace ew ON ew.id = ps.workspace_id
+		WHERE ps.id = $1
+		  AND ps.revoked_at IS NULL
+		  AND ps.expires_at > now()
+		  AND ii.status = 'ACTIVE'
+		  AND ew.status = 'ACTIVE'`,
 		sessionID,
-	).Scan(&session.ID, &session.WorkspaceID, &session.InstallationID, &session.ActorID, &session.ExpiresAt)
+	).Scan(
+		&session.ID,
+		&session.WorkspaceID,
+		&session.InstallationID,
+		&session.ActorID,
+		&session.PermissionSnapshot,
+		&session.ExpiresAt,
+	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

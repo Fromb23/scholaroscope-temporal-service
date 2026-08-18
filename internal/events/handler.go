@@ -31,6 +31,15 @@ func NewHandler(
 	}
 }
 
+func (h *Handler) Deprecated(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusGone, map[string]any{
+		"error": map[string]string{
+			"code":    "legacy_event_route_removed",
+			"message": "Use the signed installation-aware /integration/scholaroscope/events endpoint.",
+		},
+	})
+}
+
 // POST /events/session.created
 func (h *Handler) OnSessionCreated(w http.ResponseWriter, r *http.Request) {
 	var payload struct {

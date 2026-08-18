@@ -26,5 +26,6 @@ type PortalSession struct {
 	WorkspaceID    uuid.UUID
 	InstallationID uuid.UUID
 	ActorID        uuid.UUID
+	PermissionSnapshot map[string]any
 	ExpiresAt      time.Time
 }
