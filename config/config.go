@@ -6,8 +6,10 @@ import (
 )
 
 type Config struct {
-	DatabaseURL string
-	Port        string
+	DatabaseURL                   string
+	Port                          string
+	ScholaroscopeWebhookSecret    string
+	ScholaroscopeAllowedTimestamp string
 }
 
 func Load() (*Config, error) {
@@ -24,8 +26,10 @@ func Load() (*Config, error) {
 		)
 	}
 	return &Config{
-		DatabaseURL: dbURL,
-		Port:        getEnv("PORT", "8081"),
+		DatabaseURL:                   dbURL,
+		Port:                          getEnv("PORT", "8081"),
+		ScholaroscopeWebhookSecret:    os.Getenv("TEMPORAL_SCHOLAROSCOPE_WEBHOOK_SECRET"),
+		ScholaroscopeAllowedTimestamp: getEnv("TEMPORAL_WEBHOOK_ALLOWED_SKEW_SECONDS", "300"),
 	}, nil
 }
 

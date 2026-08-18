@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS external_workspace_unique_scholaroscope_ref_idx;
