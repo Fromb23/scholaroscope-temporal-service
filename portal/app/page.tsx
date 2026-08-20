@@ -30,7 +30,7 @@ function DashboardContent({
   setWorkspace,
   setError,
 }: {
-  session: { workspace_uuid: string; actor_uuid: string; expires_at: string };
+  session: { workspace_uuid: string; workspace_name?: string; actor_uuid: string; actor_display_name?: string; expires_at: string };
   workspace: WorkspaceStatus | null;
   error: string | null;
   setWorkspace: (workspace: WorkspaceStatus) => void;
@@ -44,26 +44,46 @@ function DashboardContent({
   }, [setError, setWorkspace]);
   return (
     <>
-          <h2>Workspace identity and integration status</h2>
+          <h2>{workspace?.display_name ?? session.workspace_name ?? "Timetable management"}</h2>
+          <p className="muted">
+            Signed in as {workspace?.actor?.display_name ?? session.actor_display_name ?? "Timetable manager"}.
+            {workspace?.timezone ? ` Workspace timezone: ${workspace.timezone}.` : ""}
+          </p>
           {error ? <div className="error">{error}</div> : null}
           <div className="grid">
             <section className="card">
-              <h3>Workspace</h3>
-              <p>{workspace?.display_name ?? session.workspace_uuid}</p>
-              <p className="muted">{workspace?.timezone ?? "Timezone unavailable"}</p>
+              <h3>Academic context</h3>
+              <p>{workspace?.current_term?.academic_year_label ?? "No synchronized academic year"}</p>
+              <p className="muted">
+                {workspace?.current_term
+                  ? `${workspace.current_term.name}: ${workspace.current_term.start_date} to ${workspace.current_term.end_date}`
+                  : "No eligible active term is synchronized."}
+              </p>
             </section>
             <section className="card">
-              <h3>Actor</h3>
-              <p>{session.actor_uuid}</p>
+              <h3>Teaching demand</h3>
+              <p>{workspace?.counts?.teaching_assignment_count ?? 0} assignments</p>
+              <p className="muted">
+                {(workspace?.counts?.class_count ?? 0)} classes · {(workspace?.counts?.teacher_count ?? 0)} teachers · {(workspace?.counts?.subject_count ?? 0)} subjects
+              </p>
             </section>
             <section className="card">
-              <h3>Session expiry</h3>
-              <p>{new Date(session.expires_at).toLocaleString()}</p>
+              <h3>Timetables</h3>
+              <p>{workspace?.counts?.published_timetable_count ?? 0} published</p>
+              <p className="muted">{workspace?.counts?.timetable_count ?? 0} total drafts/published records</p>
             </section>
             <section className="card">
-              <h3>Provisioning</h3>
+              <h3>Integration</h3>
               <p>{workspace?.provisioning_state ?? "Loading"}</p>
-              <p className="muted">Health: {workspace?.integration_health ?? "UNKNOWN"}</p>
+              <p className="muted">
+                Health: {workspace?.integration_health ?? "UNKNOWN"}
+                {workspace?.reconciliation_required ? " · reconciliation required" : ""}
+              </p>
+            </section>
+            <section className="card">
+              <h3>Session</h3>
+              <p>Portal session active</p>
+              <p className="muted">Expires {new Date(session.expires_at).toLocaleString()}</p>
             </section>
           </div>
         </>

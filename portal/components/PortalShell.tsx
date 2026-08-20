@@ -39,7 +39,11 @@ export function PortalShell({
       <aside className="sidebar">
         <h1>Timetable Portal</h1>
         <p className="muted">Workspace</p>
-        <p>{session.workspace_uuid}</p>
+        <p>{session.workspace_name ?? "Workspace"}</p>
+        <p className="muted">{session.workspace_timezone ?? "Timezone unavailable"}</p>
+        <p className="muted">Signed in as</p>
+        <p>{session.actor_display_name ?? "Timetable manager"}</p>
+        {session.actor_kind ? <p className="muted">{session.actor_kind.toLowerCase()}</p> : null}
         <nav className="nav">
           {visibleNav.map(([label, href]) => (
             <Link key={href} href={href}>

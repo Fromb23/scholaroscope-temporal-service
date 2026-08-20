@@ -24,8 +24,12 @@ type GrantPayload struct {
 type PortalSession struct {
 	ID             uuid.UUID
 	WorkspaceID    uuid.UUID
+	WorkspaceName  string
+	WorkspaceTimezone string
 	InstallationID uuid.UUID
 	ActorID        uuid.UUID
+	ActorDisplayName string
+	ActorKind      string
 	PermissionSnapshot map[string]any
 	ExpiresAt      time.Time
 }

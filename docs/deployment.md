@@ -39,12 +39,24 @@ Copy `.env.example` to `.env` and set:
 - `POSTGRES_PASSWORD`
 - `TEMPORAL_SCHOLAROSCOPE_WEBHOOK_SECRET` — bootstrap/control-plane secret only.
   This must match Scholaroscope `TIMETABLE_PLUGIN_BOOTSTRAP_SECRET`.
-- `SCHOLAROSCOPE_TIMETABLE_WEBHOOK_URL`
+- `SCHOLAROSCOPE_TIMETABLE_WEBHOOK_URL`, for production:
+  `https://api.scholaroscope.com/api/plugins/timetable/webhooks/`
 - `TEMPORAL_PORTAL_PUBLIC_URL`
 - `TEMPORAL_API_PUBLIC_URL`
-- `TEMPORAL_CORS_ALLOWED_ORIGINS`
+- `TEMPORAL_CORS_ALLOWED_ORIGINS`, including
+  `https://scholaroscope.com`, `https://www.scholaroscope.com`, and the portal
+  origin where same-origin portal API calls are routed through the Go service.
 
 Production should keep `TEMPORAL_PORTAL_COOKIE_SECURE=true`.
+
+Do not use wildcard CORS origins with credentials. The launch exchange is a
+credentialed POST from Scholaroscope to `/portal/launch/exchange` and requires
+`Content-Type`, `X-Scholaroscope-Timestamp`, and `X-Scholaroscope-Signature`.
+
+The compose `migrations` service records applied `*.up.sql` files in
+`schema_migrations` and skips previously applied versions. This is required for
+existing production volumes because some historical DDL statements are not safe
+to rerun.
 
 ## Installation-scoped runtime trust
 

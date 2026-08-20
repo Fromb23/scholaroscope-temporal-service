@@ -17,6 +17,7 @@ type BootstrapPayload struct {
 type AcademicSyncPayload struct {
 	Actors              []ActorProjection              `json:"actors"`
 	Terms               []TermProjection               `json:"terms"`
+	CalendarEvents      []CalendarEventProjection      `json:"calendar_events"`
 	Cohorts             []CohortProjection             `json:"cohorts"`
 	Subjects            []SubjectProjection            `json:"subjects"`
 	CohortSubjects      []CohortSubjectProjection      `json:"cohort_subjects"`
@@ -40,6 +41,21 @@ type TermProjection struct {
 	StartDate         string `json:"start_date"`
 	EndDate           string `json:"end_date"`
 	Status            string `json:"status"`
+	CalendarReady     bool   `json:"calendar_ready"`
+	IsFrozen          bool   `json:"is_frozen"`
+}
+
+type CalendarEventProjection struct {
+	EventRef        string `json:"event_ref"`
+	EventUUID       string `json:"event_uuid"`
+	TermRef         string `json:"term_ref"`
+	TermUUID        string `json:"term_uuid"`
+	Title           string `json:"title"`
+	EventType       string `json:"event_type"`
+	StartDate       string `json:"start_date"`
+	EndDate         string `json:"end_date"`
+	AffectsLearning bool   `json:"affects_learning"`
+	Source          string `json:"source"`
 }
 
 type CohortProjection struct {

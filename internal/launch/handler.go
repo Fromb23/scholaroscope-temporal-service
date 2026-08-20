@@ -81,10 +81,14 @@ func (h *Handler) Exchange(w http.ResponseWriter, r *http.Request) {
 		Expires:  session.ExpiresAt,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":         "launched",
-		"workspace_uuid": session.WorkspaceID,
-		"actor_uuid":     session.ActorID,
-		"expires_at":     session.ExpiresAt,
+		"status":             "launched",
+		"workspace_uuid":     session.WorkspaceID,
+		"workspace_name":     session.WorkspaceName,
+		"workspace_timezone": session.WorkspaceTimezone,
+		"actor_uuid":         session.ActorID,
+		"actor_display_name": session.ActorDisplayName,
+		"actor_kind":         session.ActorKind,
+		"expires_at":         session.ExpiresAt,
 	})
 }
 
@@ -94,10 +98,14 @@ func (h *Handler) Session(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"workspace_uuid": session.WorkspaceID,
-		"actor_uuid":     session.ActorID,
-		"permissions":    permissionKeys(session.PermissionSnapshot),
-		"expires_at":     session.ExpiresAt,
+		"workspace_uuid":     session.WorkspaceID,
+		"workspace_name":     session.WorkspaceName,
+		"workspace_timezone": session.WorkspaceTimezone,
+		"actor_uuid":         session.ActorID,
+		"actor_display_name": session.ActorDisplayName,
+		"actor_kind":         session.ActorKind,
+		"permissions":        permissionKeys(session.PermissionSnapshot),
+		"expires_at":         session.ExpiresAt,
 	})
 }
 

@@ -66,33 +66,36 @@ func (r *Repo) ConsumeGrant(ctx context.Context, payload GrantPayload, payloadHa
 	defer tx.Rollback(ctx)
 
 	var installationID uuid.UUID
+	var workspaceName string
+	var workspaceTimezone string
 	err = tx.QueryRow(ctx, `
-		SELECT id
-		FROM integration_installation
-		WHERE workspace_id = $1
-		  AND scholaroscope_installation_ref = $2
-		  AND status = 'ACTIVE'`,
+		SELECT ii.id, ew.display_name, ew.timezone
+		FROM integration_installation ii
+		JOIN external_workspace ew ON ew.id = ii.workspace_id
+		WHERE ii.workspace_id = $1
+		  AND ii.scholaroscope_installation_ref = $2
+		  AND ii.status = 'ACTIVE'
+		  AND ew.status = 'ACTIVE'`,
 		workspaceID,
 		payload.PluginInstallationRef,
-	).Scan(&installationID)
+	).Scan(&installationID, &workspaceName, &workspaceTimezone)
 	if err != nil {
 		return nil, fmt.Errorf("launch repo: active installation: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, `
-		INSERT INTO external_actor (
-			id, workspace_id, scholaroscope_user_ref, display_name, actor_kind, status
-		)
-		VALUES ($1, $2, $3, $4, 'MANAGER', 'ACTIVE')
-		ON CONFLICT (workspace_id, scholaroscope_user_ref)
-		DO UPDATE SET status = 'ACTIVE', updated_at = now()`,
+	var actorDisplayName string
+	var actorKind string
+	err = tx.QueryRow(ctx, `
+		SELECT display_name, actor_kind
+		FROM external_actor
+		WHERE id = $1
+		  AND workspace_id = $2
+		  AND status = 'ACTIVE'`,
 		actorID,
 		workspaceID,
-		payload.ActorUUID,
-		payload.ActorUUID,
-	)
+	).Scan(&actorDisplayName, &actorKind)
 	if err != nil {
-		return nil, fmt.Errorf("launch repo: upsert actor: %w", err)
+		return nil, fmt.Errorf("launch repo: active synchronized actor: %w", err)
 	}
 
 	commandTag, err := tx.Exec(ctx, `
@@ -145,34 +148,45 @@ func (r *Repo) ConsumeGrant(ctx context.Context, payload GrantPayload, payloadHa
 		return nil, fmt.Errorf("launch repo: commit: %w", err)
 	}
 	return &PortalSession{
-		ID:             sessionID,
-		WorkspaceID:    workspaceID,
-		InstallationID: installationID,
-		ActorID:        actorID,
+		ID:               sessionID,
+		WorkspaceID:      workspaceID,
+		WorkspaceName:    workspaceName,
+		WorkspaceTimezone: workspaceTimezone,
+		InstallationID:   installationID,
+		ActorID:          actorID,
+		ActorDisplayName: actorDisplayName,
+		ActorKind:        actorKind,
 		PermissionSnapshot: payload.PermissionSnapshot,
-		ExpiresAt:      sessionExpiresAt,
+		ExpiresAt:        sessionExpiresAt,
 	}, nil
 }
 
 func (r *Repo) GetSession(ctx context.Context, sessionID uuid.UUID) (*PortalSession, error) {
 	var session PortalSession
 	err := r.pool.QueryRow(ctx, `
-		SELECT ps.id, ps.workspace_id, ps.installation_id, ps.actor_id,
+		SELECT ps.id, ps.workspace_id, ew.display_name, ew.timezone,
+		       ps.installation_id, ps.actor_id, ea.display_name, ea.actor_kind,
 		       ps.permission_snapshot, ps.expires_at
 		FROM portal_session ps
 		JOIN integration_installation ii ON ii.id = ps.installation_id
 		JOIN external_workspace ew ON ew.id = ps.workspace_id
+		JOIN external_actor ea ON ea.id = ps.actor_id AND ea.workspace_id = ps.workspace_id
 		WHERE ps.id = $1
 		  AND ps.revoked_at IS NULL
 		  AND ps.expires_at > now()
 		  AND ii.status = 'ACTIVE'
-		  AND ew.status = 'ACTIVE'`,
+		  AND ew.status = 'ACTIVE'
+		  AND ea.status = 'ACTIVE'`,
 		sessionID,
 	).Scan(
 		&session.ID,
 		&session.WorkspaceID,
+		&session.WorkspaceName,
+		&session.WorkspaceTimezone,
 		&session.InstallationID,
 		&session.ActorID,
+		&session.ActorDisplayName,
+		&session.ActorKind,
 		&session.PermissionSnapshot,
 		&session.ExpiresAt,
 	)

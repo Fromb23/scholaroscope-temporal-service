@@ -1,6 +1,10 @@
 export type PortalSession = {
   workspace_uuid: string;
+  workspace_name?: string;
+  workspace_timezone?: string;
   actor_uuid: string;
+  actor_display_name?: string;
+  actor_kind?: string;
   permissions?: string[];
   expires_at: string;
 };
@@ -14,6 +18,20 @@ export type WorkspaceStatus = {
   integration_health: string;
   last_successful_sync_at: string | null;
   reconciliation_required: boolean;
+  actor?: {
+    actor_uuid: string;
+    display_name: string;
+    actor_kind: string;
+  };
+  current_term?: {
+    term_uuid: string;
+    name: string;
+    academic_year_label: string;
+    start_date: string;
+    end_date: string;
+    status: string;
+  } | null;
+  counts?: Record<string, number>;
 };
 
 export type CalendarVersion = {
@@ -66,6 +84,22 @@ export type TeachingDemandResponse = {
   demands: TeachingDemand[];
   count: number;
   status: string;
+};
+
+export type CalendarException = {
+  exception_uuid: string;
+  date: string;
+  kind: string;
+  title: string;
+  blocks_learning: boolean;
+  academic_term_uuid: string;
+  calendar_name: string;
+  source: string;
+};
+
+export type CalendarExceptionResponse = {
+  exceptions: CalendarException[];
+  count: number;
 };
 
 const apiBase = process.env.NEXT_PUBLIC_TEMPORAL_API_BASE_URL ?? "http://localhost:8081";

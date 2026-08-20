@@ -3,7 +3,9 @@ package portalapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"scholaroscope-temporal-service/internal/calendar"
@@ -493,7 +495,61 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 		writeError(w, http.StatusNotFound, "workspace_not_found")
 		return
 	}
-	writeJSON(w, http.StatusOK, workspace)
+	var currentTerm map[string]any
+	termRow := h.pool.QueryRow(r.Context(), `
+		SELECT id, name, academic_year_label, start_date::text, end_date::text, status
+		FROM external_academic_term
+		WHERE workspace_id = $1
+		  AND status IN ('OPEN', 'ACTIVE', 'READY')
+		  AND start_date <= CURRENT_DATE
+		  AND end_date >= CURRENT_DATE
+		ORDER BY start_date DESC
+		LIMIT 1`,
+		session.WorkspaceID,
+	)
+	var termID uuid.UUID
+	var termName, academicYearLabel, termStart, termEnd, termStatus string
+	if err := termRow.Scan(&termID, &termName, &academicYearLabel, &termStart, &termEnd, &termStatus); err == nil {
+		currentTerm = map[string]any{
+			"term_uuid": termID.String(),
+			"name": termName,
+			"academic_year_label": academicYearLabel,
+			"start_date": termStart,
+			"end_date": termEnd,
+			"status": termStatus,
+		}
+	}
+	counts := map[string]int{}
+	for key, query := range map[string]string{
+		"teacher_count": "SELECT COUNT(*) FROM external_actor WHERE workspace_id = $1 AND status = 'ACTIVE' AND actor_kind IN ('TEACHER', 'MANAGER')",
+		"class_count": "SELECT COUNT(*) FROM external_cohort WHERE workspace_id = $1 AND status = 'ACTIVE'",
+		"subject_count": "SELECT COUNT(*) FROM external_subject WHERE workspace_id = $1 AND status IN ('ACTIVE', 'OFFERED', 'REACTIVATED')",
+		"teaching_assignment_count": "SELECT COUNT(*) FROM external_teaching_assignment WHERE workspace_id = $1 AND status = 'ACTIVE'",
+		"timetable_count": "SELECT COUNT(*) FROM timetable WHERE workspace_id = $1",
+		"published_timetable_count": "SELECT COUNT(*) FROM timetable_version WHERE workspace_id = $1 AND status = 'PUBLISHED'",
+	} {
+		var count int
+		if err := h.pool.QueryRow(r.Context(), query, session.WorkspaceID).Scan(&count); err == nil {
+			counts[key] = count
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workspace_uuid": workspace.ID,
+		"display_name": workspace.DisplayName,
+		"timezone": workspace.Timezone,
+		"status": workspace.Status,
+		"provisioning_state": workspace.ProvisioningState,
+		"integration_health": workspace.IntegrationHealth,
+		"last_successful_sync_at": workspace.LastSuccessfulSyncAt,
+		"reconciliation_required": workspace.ReconciliationRequired,
+		"actor": map[string]any{
+			"actor_uuid": session.ActorID.String(),
+			"display_name": session.ActorDisplayName,
+			"actor_kind": session.ActorKind,
+		},
+		"current_term": currentTerm,
+		"counts": counts,
+	})
 }
 
 func (h *Handler) GetCalendar(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
@@ -552,6 +608,48 @@ func (h *Handler) PutCalendar(w http.ResponseWriter, r *http.Request, session *l
 		"calendar_version": version,
 		"slots": slots,
 		"status": "ACTIVE",
+	})
+}
+
+func (h *Handler) CalendarExceptions(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
+	rows, err := h.pool.Query(r.Context(), `
+		SELECT id, starts_on::text, ends_on::text, event_kind, title,
+		       affects_learning, term_uuid, source
+		FROM external_calendar_event
+		WHERE workspace_id = $1
+		  AND status = 'ACTIVE'
+		ORDER BY starts_on, event_kind`,
+		session.WorkspaceID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "calendar_exceptions_query_failed")
+		return
+	}
+	defer rows.Close()
+	exceptions := []map[string]any{}
+	for rows.Next() {
+		var id uuid.UUID
+		var startsOn, endsOn, kind, label, source string
+		var affectsLearning bool
+		var termID *uuid.UUID
+		if err := rows.Scan(&id, &startsOn, &endsOn, &kind, &label, &affectsLearning, &termID, &source); err != nil {
+			writeError(w, http.StatusInternalServerError, "calendar_exceptions_scan_failed")
+			return
+		}
+		exceptions = append(exceptions, map[string]any{
+			"exception_uuid": id.String(),
+			"date": startsOn,
+			"end_date": endsOn,
+			"kind": kind,
+			"title": label,
+			"blocks_learning": affectsLearning,
+			"academic_term_uuid": uuidString(termID),
+			"source": source,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exceptions": exceptions,
+		"count": len(exceptions),
 	})
 }
 
@@ -705,14 +803,23 @@ func (h *Handler) Timetables(w http.ResponseWriter, r *http.Request, session *la
 func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
 	var body struct {
 		Name             string `json:"name"`
+		TimetableType    string `json:"timetable_type"`
 		AcademicTermUUID string `json:"academic_term_uuid"`
 		CalendarUUID     string `json:"calendar_uuid"`
 		EffectiveStart   string `json:"effective_start"`
 		EffectiveEnd     string `json:"effective_end"`
 		ScopeKind        string `json:"scope_kind"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_timetable")
+		return
+	}
+	timetableType := body.TimetableType
+	if timetableType == "" {
+		timetableType = "LEARNING"
+	}
+	if timetableType != "LEARNING" && timetableType != "EXAMINATION" {
+		writeError(w, http.StatusBadRequest, "invalid_timetable_type")
 		return
 	}
 	start, err := time.Parse("2006-01-02", body.EffectiveStart)
@@ -726,6 +833,8 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	var termID *uuid.UUID
+	var termName, academicYearLabel string
+	var termStart, termEnd time.Time
 	if body.AcademicTermUUID != "" {
 		parsed, err := uuid.Parse(body.AcademicTermUUID)
 		if err != nil {
@@ -733,6 +842,41 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 			return
 		}
 		termID = &parsed
+		err = h.pool.QueryRow(r.Context(), `
+			SELECT name, academic_year_label, start_date, end_date
+			FROM external_academic_term
+			WHERE id = $1
+			  AND workspace_id = $2
+			  AND status IN ('OPEN', 'ACTIVE', 'READY')`,
+			*termID,
+			session.WorkspaceID,
+		).Scan(&termName, &academicYearLabel, &termStart, &termEnd)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "active_term_not_found")
+			return
+		}
+	} else {
+		var activeTermID uuid.UUID
+		err = h.pool.QueryRow(r.Context(), `
+			SELECT id, name, academic_year_label, start_date, end_date
+			FROM external_academic_term
+			WHERE workspace_id = $1
+			  AND status IN ('OPEN', 'ACTIVE', 'READY')
+			  AND start_date <= CURRENT_DATE
+			  AND end_date >= CURRENT_DATE
+			ORDER BY start_date DESC
+			LIMIT 1`,
+			session.WorkspaceID,
+		).Scan(&activeTermID, &termName, &academicYearLabel, &termStart, &termEnd)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "active_term_not_found")
+			return
+		}
+		termID = &activeTermID
+	}
+	if start.Before(termStart) || end.After(termEnd) {
+		writeError(w, http.StatusBadRequest, "effective_dates_outside_active_term")
+		return
 	}
 	var calendarID *uuid.UUID
 	if body.CalendarUUID != "" {
@@ -742,10 +886,28 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 			return
 		}
 		calendarID = &parsed
+	} else if timetableType == "LEARNING" {
+		version, err := h.calendarService.GetActiveCalendar(r.Context(), session.WorkspaceID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "active_calendar_required")
+			return
+		}
+		calendarID = &version.ID
 	}
 	scopeKind := body.ScopeKind
 	if scopeKind == "" {
 		scopeKind = "WORKSPACE"
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		typeLabel := "Learning"
+		if timetableType == "EXAMINATION" {
+			typeLabel = "Examination"
+		}
+		name = fmt.Sprintf("%s %s %s Timetable", session.WorkspaceName, termName, typeLabel)
+		if academicYearLabel != "" {
+			name = fmt.Sprintf("%s %s %s Timetable", session.WorkspaceName, academicYearLabel+" "+termName, typeLabel)
+		}
 	}
 	timetableID := uuid.New()
 	versionID := uuid.New()
@@ -757,8 +919,8 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 	defer tx.Rollback(r.Context())
 	_, err = tx.Exec(r.Context(), `
 		INSERT INTO timetable (id, workspace_id, calendar_id, academic_term_uuid, timetable_type, scope_kind, name, effective_start, effective_end)
-		VALUES ($1, $2, $3, $4, 'LEARNING', $5, $6, $7, $8)`,
-		timetableID, session.WorkspaceID, calendarID, termID, scopeKind, body.Name, start, end,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		timetableID, session.WorkspaceID, calendarID, termID, timetableType, scopeKind, name, start, end,
 	)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "timetable_create_failed")
