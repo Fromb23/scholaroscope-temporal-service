@@ -1,12 +1,14 @@
 "use client";
+
 import { useEffect, useState } from "react";
 import { RequireSession } from "../../components/RequireSession";
-import { apiGet } from "../../lib/api";
+import { apiGet, type TeachingDemandResponse } from "../../lib/api";
+
 export default function DemandPage() {
-  const [payload, setPayload] = useState<unknown>(null);
+  const [payload, setPayload] = useState<TeachingDemandResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    apiGet("/api/v1/teaching-demands")
+    apiGet<TeachingDemandResponse>("/api/v1/teaching-demands")
       .then(setPayload)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
   }, []);
@@ -14,10 +16,33 @@ export default function DemandPage() {
     <RequireSession>
       {() => (
         <section className="card">
-          <h2>Timetable demand definition</h2>
-          <p className="muted">Demand comes from synchronized Scholaroscope teaching assignments.</p>
+          <h2>Synchronized teaching demand</h2>
+          <p className="muted">Demand comes from Scholaroscope teaching assignments synchronized during provisioning/reconciliation.</p>
           {error ? <div className="error">{error}</div> : null}
-          <pre>{JSON.stringify(payload, null, 2)}</pre>
+          {!payload?.demands?.length ? (
+            <p>No synchronized teaching demand is available yet.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Teacher</th>
+                  <th>Class</th>
+                  <th>Subject</th>
+                  <th>Periods/cycle</th>
+                </tr>
+              </thead>
+              <tbody>
+                {payload.demands.map((demand) => (
+                  <tr key={demand.teaching_assignment_uuid}>
+                    <td>{demand.teacher_name}</td>
+                    <td>{demand.cohort_name}</td>
+                    <td>{demand.subject_name}</td>
+                    <td>1</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </section>
       )}
     </RequireSession>

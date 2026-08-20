@@ -1,0 +1,17 @@
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /out/temporal-api ./cmd/server
+RUN go build -o /out/temporal-outbox-worker ./cmd/outbox-worker
+
+FROM alpine:3.21
+RUN adduser -D -H temporal
+WORKDIR /app
+COPY --from=build /out/temporal-api /app/temporal-api
+COPY --from=build /out/temporal-outbox-worker /app/temporal-outbox-worker
+USER temporal
+EXPOSE 8081
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD wget -qO- http://127.0.0.1:8081/health/live || exit 1
+CMD ["/app/temporal-api"]

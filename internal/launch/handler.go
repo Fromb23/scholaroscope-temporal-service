@@ -32,13 +32,19 @@ func NewHandler(repo *Repo, launchSecret string, allowedSkew time.Duration, sess
 }
 
 func (h *Handler) Exchange(w http.ResponseWriter, r *http.Request) {
-	if h.launchSecret == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "launch_secret_not_configured"}})
-		return
-	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_body"}})
+		return
+	}
+	var payload GrantPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_payload"}})
+		return
+	}
+	secret, err := h.repo.InstallationSecret(r.Context(), payload.PluginInstallationRef)
+	if err != nil || secret == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unknown_or_inactive_installation"}})
 		return
 	}
 	timestamp := r.Header.Get(protocol.TimestampHeader)
@@ -46,13 +52,8 @@ func (h *Handler) Exchange(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "expired_timestamp"}})
 		return
 	}
-	if err := protocol.VerifySignature(h.launchSecret, timestamp, body, r.Header.Get(protocol.SignatureHeader)); err != nil {
+	if err := protocol.VerifySignature(secret, timestamp, body, r.Header.Get(protocol.SignatureHeader)); err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "invalid_signature"}})
-		return
-	}
-	var payload GrantPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_payload"}})
 		return
 	}
 	if payload.Issuer != "scholaroscope" || payload.Audience != "scholaroscope-temporal-service" || payload.Purpose != "TIMETABLE_MANAGEMENT" {

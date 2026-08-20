@@ -11,6 +11,8 @@ import (
 	"scholaroscope-temporal-service/internal/protocol"
 )
 
+const BootstrapSignatureHeader = "X-Scholaroscope-Bootstrap-Signature"
+
 type Handler struct {
 	repo              *Repo
 	webhookSecret     string
@@ -30,29 +32,43 @@ func NewHandler(repo *Repo, webhookSecret string, allowedSkewSeconds string) *Ha
 }
 
 func (h *Handler) HandleScholaroscopeEvent(w http.ResponseWriter, r *http.Request) {
-	if h.webhookSecret == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"error": map[string]string{
-				"code":    "webhook_secret_not_configured",
-				"message": "Scholaroscope webhook verification is not configured.",
-			},
-		})
-		return
-	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_body"}})
 		return
 	}
+	var hint struct {
+		EventType             string `json:"event_type"`
+		PluginInstallationRef string `json:"plugin_installation_ref"`
+	}
+	if err := json.Unmarshal(body, &hint); err != nil || hint.PluginInstallationRef == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_envelope"}})
+		return
+	}
 	timestamp := r.Header.Get(protocol.TimestampHeader)
-	signature := r.Header.Get(protocol.SignatureHeader)
 	if err := protocol.VerifyTimestamp(timestamp, time.Now().UTC(), h.allowedSkew); err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "expired_timestamp"}})
 		return
 	}
-	if err := protocol.VerifySignature(h.webhookSecret, timestamp, body, signature); err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "invalid_signature"}})
+	secret, exists, err := h.repo.InstallationSecret(r.Context(), hint.PluginInstallationRef)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "installation_lookup_failed"}})
 		return
+	}
+	if exists {
+		if err := protocol.VerifySignature(secret, timestamp, body, r.Header.Get(protocol.SignatureHeader)); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "invalid_signature"}})
+			return
+		}
+	} else {
+		if hint.EventType != "scholaroscope.timetable.workspace.bootstrap_requested.v1" || h.webhookSecret == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unknown_installation"}})
+			return
+		}
+		if err := protocol.VerifySignature(h.webhookSecret, timestamp, body, r.Header.Get(BootstrapSignatureHeader)); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "invalid_bootstrap_signature"}})
+			return
+		}
 	}
 	envelope, err := protocol.ParseEnvelope(body)
 	if err != nil {

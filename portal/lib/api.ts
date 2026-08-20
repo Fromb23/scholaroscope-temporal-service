@@ -34,6 +34,40 @@ export type CalendarResponse = {
   slots: unknown[];
 };
 
+export type TimetableListItem = {
+  timetable_uuid: string;
+  name: string;
+  type: string;
+  version_uuid: string | null;
+  version_number: number | null;
+  status: string | null;
+  effective_start: string;
+  effective_end: string;
+  published_at: string | null;
+};
+
+export type TimetableListResponse = {
+  timetables: TimetableListItem[];
+  count: number;
+};
+
+export type TeachingDemand = {
+  teaching_assignment_uuid: string;
+  teacher_uuid: string;
+  teacher_name: string;
+  cohort_subject_uuid: string;
+  cohort_uuid: string;
+  cohort_name: string;
+  subject_uuid: string;
+  subject_name: string;
+};
+
+export type TeachingDemandResponse = {
+  demands: TeachingDemand[];
+  count: number;
+  status: string;
+};
+
 const apiBase = process.env.NEXT_PUBLIC_TEMPORAL_API_BASE_URL ?? "http://localhost:8081";
 
 export async function apiGet<T>(path: string): Promise<T> {

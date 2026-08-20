@@ -18,6 +18,10 @@ type Config struct {
 	PortalSessionDuration         time.Duration
 	PortalCookieSecure            bool
 	CORSAllowedOrigins            []string
+	OutboxRequestTimeout          time.Duration
+	OutboxMaxAttempts             int
+	OutboxBatchSize               int
+	OutboxPollInterval            time.Duration
 }
 
 func Load() (*Config, error) {
@@ -47,6 +51,10 @@ func Load() (*Config, error) {
 		PortalSessionDuration:         time.Duration(portalSessionMinutes) * time.Minute,
 		PortalCookieSecure:            getEnvBool("TEMPORAL_PORTAL_COOKIE_SECURE", !strings.HasPrefix(getEnv("TEMPORAL_PORTAL_PUBLIC_URL", "http://localhost:3000"), "http://")),
 		CORSAllowedOrigins:            splitCSV(getEnv("TEMPORAL_CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000")),
+		OutboxRequestTimeout:          time.Duration(getEnvInt("TEMPORAL_OUTBOX_REQUEST_TIMEOUT_SECONDS", 10)) * time.Second,
+		OutboxMaxAttempts:             getEnvInt("TEMPORAL_OUTBOX_MAX_ATTEMPTS", 8),
+		OutboxBatchSize:               getEnvInt("TEMPORAL_OUTBOX_BATCH_SIZE", 25),
+		OutboxPollInterval:            time.Duration(getEnvInt("TEMPORAL_OUTBOX_POLL_SECONDS", 30)) * time.Second,
 	}, nil
 }
 
