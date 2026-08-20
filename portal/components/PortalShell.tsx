@@ -6,7 +6,6 @@ const nav = [
   ["Status", "/"],
   ["Terms", "/terms"],
   ["Learning timetable", "/learning"],
-  ["Examinations", "/examinations"],
   ["Bell periods", "/bell-periods"],
   ["Exceptions", "/exceptions"],
   ["Teacher availability", "/availability"],
@@ -22,6 +21,8 @@ const nav = [
   ["Logout", "/logout"],
 ] as const;
 
+const examNav = ["Examinations", "/examinations"] as const;
+
 export function PortalShell({
   session,
   children,
@@ -29,6 +30,10 @@ export function PortalShell({
   session: PortalSession;
   children: ReactNode;
 }) {
+  const permissions = new Set(session.permissions ?? []);
+  const visibleNav = permissions.has("timetable.examinations.manage")
+    ? [...nav.slice(0, 3), examNav, ...nav.slice(3)]
+    : nav;
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -36,7 +41,7 @@ export function PortalShell({
         <p className="muted">Workspace</p>
         <p>{session.workspace_uuid}</p>
         <nav className="nav">
-          {nav.map(([label, href]) => (
+          {visibleNav.map(([label, href]) => (
             <Link key={href} href={href}>
               {label}
             </Link>

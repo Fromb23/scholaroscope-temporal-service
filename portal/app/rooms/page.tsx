@@ -8,7 +8,6 @@ export default function RoomsPage() {
   const [capacity, setCapacity] = useState("");
   const [error, setError] = useState<string | null>(null);
   const load = () => {
-    setError(null);
     apiGet("/api/v1/rooms")
       .then(setRooms)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));

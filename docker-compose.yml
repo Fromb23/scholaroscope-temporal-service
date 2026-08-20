@@ -1,0 +1,90 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-temporal_service}
+      POSTGRES_USER: ${POSTGRES_USER:-temporal_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - temporal_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
+
+  migrations:
+    image: postgres:17-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      'for f in /migrations/*.up.sql; do
+        echo "applying $$f";
+        psql -v ON_ERROR_STOP=1
+          -h postgres
+          -U ${POSTGRES_USER:-temporal_user}
+          -d ${POSTGRES_DB:-temporal_service}
+          -f "$$f";
+      done'
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_DATABASE_URL: postgres://${POSTGRES_USER:-temporal_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-temporal_service}?sslmode=disable
+      PORT: 8081
+      TEMPORAL_SCHOLAROSCOPE_WEBHOOK_SECRET: ${TEMPORAL_SCHOLAROSCOPE_WEBHOOK_SECRET:?set bootstrap secret}
+      SCHOLAROSCOPE_TIMETABLE_WEBHOOK_URL: ${SCHOLAROSCOPE_TIMETABLE_WEBHOOK_URL:?set Scholaroscope callback URL}
+      TEMPORAL_PORTAL_PUBLIC_URL: ${TEMPORAL_PORTAL_PUBLIC_URL:?set portal URL}
+      TEMPORAL_CORS_ALLOWED_ORIGINS: ${TEMPORAL_CORS_ALLOWED_ORIGINS:?set frontend origins}
+      TEMPORAL_PORTAL_COOKIE_SECURE: ${TEMPORAL_PORTAL_COOKIE_SECURE:-true}
+    ports:
+      - "127.0.0.1:${TEMPORAL_API_HOST_PORT:-8081}:8081"
+
+  outbox-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    command: ["/app/temporal-outbox-worker"]
+    environment:
+      TEMPORAL_DATABASE_URL: postgres://${POSTGRES_USER:-temporal_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-temporal_service}?sslmode=disable
+      SCHOLAROSCOPE_TIMETABLE_WEBHOOK_URL: ${SCHOLAROSCOPE_TIMETABLE_WEBHOOK_URL:?set Scholaroscope callback URL}
+      TEMPORAL_OUTBOX_REQUEST_TIMEOUT_SECONDS: ${TEMPORAL_OUTBOX_REQUEST_TIMEOUT_SECONDS:-10}
+      TEMPORAL_OUTBOX_MAX_ATTEMPTS: ${TEMPORAL_OUTBOX_MAX_ATTEMPTS:-8}
+      TEMPORAL_OUTBOX_BATCH_SIZE: ${TEMPORAL_OUTBOX_BATCH_SIZE:-25}
+      TEMPORAL_OUTBOX_POLL_SECONDS: ${TEMPORAL_OUTBOX_POLL_SECONDS:-30}
+
+  portal:
+    build:
+      context: ./portal
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_TEMPORAL_API_BASE_URL: ${TEMPORAL_API_PUBLIC_URL:?set public API URL}
+    ports:
+      - "127.0.0.1:${TEMPORAL_PORTAL_HOST_PORT:-3002}:3000"
+
+volumes:
+  temporal_postgres_data:

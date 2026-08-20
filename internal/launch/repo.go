@@ -18,6 +18,21 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
+func (r *Repo) InstallationSecret(ctx context.Context, installationRef string) (string, error) {
+	var secret string
+	err := r.pool.QueryRow(ctx, `
+		SELECT signing_secret
+		FROM integration_installation
+		WHERE scholaroscope_installation_ref = $1
+		  AND status = 'ACTIVE'`,
+		installationRef,
+	).Scan(&secret)
+	if err != nil {
+		return "", fmt.Errorf("launch repo: installation secret: %w", err)
+	}
+	return secret, nil
+}
+
 func (r *Repo) ConsumeGrant(ctx context.Context, payload GrantPayload, payloadHash string, sessionExpiresAt time.Time) (*PortalSession, error) {
 	workspaceID, err := uuid.Parse(payload.WorkspaceUUID)
 	if err != nil {

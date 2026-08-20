@@ -1,0 +1,11 @@
+.git
+.idea
+.env
+**/.env
+**/node_modules
+**/.next
+**/coverage
+tmp
+dist
+Dockerfile*
+docker-compose*.yml
