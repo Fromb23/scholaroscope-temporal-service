@@ -215,6 +215,65 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 			return fmt.Errorf("provisioning repo: upsert term: %w", err)
 		}
 	}
+	for _, event := range sync.CalendarEvents {
+		eventID, err := uuid.Parse(event.EventUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid calendar event uuid: %w", err)
+		}
+		var termID *uuid.UUID
+		if strings.TrimSpace(event.TermUUID) != "" {
+			parsed, err := uuid.Parse(event.TermUUID)
+			if err != nil {
+				return fmt.Errorf("provisioning repo: invalid calendar event term uuid: %w", err)
+			}
+			termID = &parsed
+		}
+		startDate, err := time.Parse("2006-01-02", event.StartDate)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid calendar event start date: %w", err)
+		}
+		endDate, err := time.Parse("2006-01-02", event.EndDate)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid calendar event end date: %w", err)
+		}
+		source := strings.TrimSpace(event.Source)
+		if source == "" {
+			source = "SCHOLAROSCOPE_TERM_CALENDAR"
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO external_calendar_event (
+				id, workspace_id, scholaroscope_event_ref, term_uuid,
+				scholaroscope_term_ref, title, event_kind, starts_on, ends_on,
+				affects_learning, source, status
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'ACTIVE')
+			ON CONFLICT (workspace_id, scholaroscope_event_ref)
+			DO UPDATE SET term_uuid = EXCLUDED.term_uuid,
+			              scholaroscope_term_ref = EXCLUDED.scholaroscope_term_ref,
+			              title = EXCLUDED.title,
+			              event_kind = EXCLUDED.event_kind,
+			              starts_on = EXCLUDED.starts_on,
+			              ends_on = EXCLUDED.ends_on,
+			              affects_learning = EXCLUDED.affects_learning,
+			              source = EXCLUDED.source,
+			              status = 'ACTIVE',
+			              updated_at = now()`,
+			eventID,
+			workspaceID,
+			event.EventRef,
+			termID,
+			event.TermRef,
+			event.Title,
+			event.EventType,
+			startDate,
+			endDate,
+			event.AffectsLearning,
+			source,
+		)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: upsert calendar event: %w", err)
+		}
+	}
 	for _, cohort := range sync.Cohorts {
 		cohortID, err := uuid.Parse(cohort.CohortUUID)
 		if err != nil {

@@ -27,13 +27,33 @@ services:
       - ./migrations:/migrations:ro
     entrypoint: ["/bin/sh", "-c"]
     command: >
-      'for f in /migrations/*.up.sql; do
-        echo "applying $$f";
+      'psql -v ON_ERROR_STOP=1
+          -h postgres
+          -U ${POSTGRES_USER:-temporal_user}
+          -d ${POSTGRES_DB:-temporal_service}
+          -c "CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())";
+      for f in /migrations/*.up.sql; do
+        version=$$(basename "$$f");
+        already=$$(psql -qtAX
+          -h postgres
+          -U ${POSTGRES_USER:-temporal_user}
+          -d ${POSTGRES_DB:-temporal_service}
+          -c "SELECT 1 FROM schema_migrations WHERE version = '\''$$version'\''");
+        if [ "$$already" = "1" ]; then
+          echo "skipping $$version";
+          continue;
+        fi;
+        echo "applying $$version";
         psql -v ON_ERROR_STOP=1
           -h postgres
           -U ${POSTGRES_USER:-temporal_user}
           -d ${POSTGRES_DB:-temporal_service}
           -f "$$f";
+        psql -v ON_ERROR_STOP=1
+          -h postgres
+          -U ${POSTGRES_USER:-temporal_user}
+          -d ${POSTGRES_DB:-temporal_service}
+          -c "INSERT INTO schema_migrations(version) VALUES ('\''$$version'\'')";
       done'
     restart: "no"
 
@@ -77,6 +97,8 @@ services:
     build:
       context: ./portal
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_TEMPORAL_API_BASE_URL: ${TEMPORAL_API_PUBLIC_URL:?set public API URL}
     restart: unless-stopped
     depends_on:
       api:
