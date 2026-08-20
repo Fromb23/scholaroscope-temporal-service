@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,8 @@ type Config struct {
 	PortalPublicURL               string
 	ScholaroscopeWebhookURL       string
 	PortalSessionDuration         time.Duration
+	PortalCookieSecure            bool
+	CORSAllowedOrigins            []string
 }
 
 func Load() (*Config, error) {
@@ -42,6 +45,8 @@ func Load() (*Config, error) {
 		PortalPublicURL:               getEnv("TEMPORAL_PORTAL_PUBLIC_URL", "http://localhost:3000"),
 		ScholaroscopeWebhookURL:       os.Getenv("SCHOLAROSCOPE_TIMETABLE_WEBHOOK_URL"),
 		PortalSessionDuration:         time.Duration(portalSessionMinutes) * time.Minute,
+		PortalCookieSecure:            getEnvBool("TEMPORAL_PORTAL_COOKIE_SECURE", !strings.HasPrefix(getEnv("TEMPORAL_PORTAL_PUBLIC_URL", "http://localhost:3000"), "http://")),
+		CORSAllowedOrigins:            splitCSV(getEnv("TEMPORAL_CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000")),
 	}, nil
 }
 
@@ -61,4 +66,26 @@ func getEnvInt(key string, fallback int) int {
 		return -1
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		parsed, err := strconv.ParseBool(v)
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }

@@ -51,10 +51,17 @@ type TimeSlot struct {
 // DayOfWeekFromString maps "MON" → 0, "TUE" → 1, etc.
 var DayOfWeekFromString = map[string]int16{
 	"MON": 0,
+	"MONDAY": 0,
 	"TUE": 1,
+	"TUESDAY": 1,
 	"WED": 2,
+	"WEDNESDAY": 2,
 	"THU": 3,
+	"THURSDAY": 3,
 	"FRI": 4,
+	"FRIDAY": 4,
 	"SAT": 5,
+	"SATURDAY": 5,
 	"SUN": 6,
+	"SUNDAY": 6,
 }

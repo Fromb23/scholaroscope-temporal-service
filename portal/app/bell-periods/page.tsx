@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { RequireSession } from "../../components/RequireSession";
-import { apiSend } from "../../lib/api";
+import { apiGet, apiSend, type CalendarResponse } from "../../lib/api";
 
 const defaultCalendar = {
   learning_days: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
@@ -19,7 +19,7 @@ export default function BellPeriodsPage() {
 
   return (
     <RequireSession>
-      {(session) => (
+      {() => (
         <>
           <h2>Bell-period configuration</h2>
           <p className="muted">Creates a real calendar version through the Go API.</p>
@@ -29,12 +29,23 @@ export default function BellPeriodsPage() {
               type="button"
               onClick={() => {
                 setError(null);
-                apiSend(`/orgs/${session.workspace_uuid}/calendar`, "POST", JSON.parse(body))
+                apiSend(`/api/v1/calendar`, "PUT", JSON.parse(body))
                   .then(setResult)
                   .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
               }}
             >
-              Save calendar draft
+              Save and activate calendar
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setError(null);
+                apiGet<CalendarResponse>("/api/v1/calendar")
+                  .then(setResult)
+                  .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
+              }}
+            >
+              Load active calendar
             </button>
           </div>
           {error ? <div className="error">{error}</div> : null}

@@ -18,14 +18,16 @@ type Handler struct {
 	launchSecret  string
 	allowedSkew   time.Duration
 	sessionTTL    time.Duration
+	cookieSecure  bool
 }
 
-func NewHandler(repo *Repo, launchSecret string, allowedSkew time.Duration, sessionTTL time.Duration) *Handler {
+func NewHandler(repo *Repo, launchSecret string, allowedSkew time.Duration, sessionTTL time.Duration, cookieSecure bool) *Handler {
 	return &Handler{
 		repo: repo,
 		launchSecret: launchSecret,
 		allowedSkew: allowedSkew,
 		sessionTTL: sessionTTL,
+		cookieSecure: cookieSecure,
 	}
 }
 
@@ -73,7 +75,7 @@ func (h *Handler) Exchange(w http.ResponseWriter, r *http.Request) {
 		Value:    session.ID.String(),
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   h.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  session.ExpiresAt,
 	})
@@ -133,11 +135,25 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   h.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
+}
+
+func (h *Handler) RequirePortalSession(permission string, next func(http.ResponseWriter, *http.Request, *PortalSession)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		session, ok := h.currentSession(w, r)
+		if !ok {
+			return
+		}
+		if permission != "" && !hasPermission(session.PermissionSnapshot, permission) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "permission_denied"}})
+			return
+		}
+		next(w, r, session)
+	}
 }
 
 func (h *Handler) currentSession(w http.ResponseWriter, r *http.Request) (*PortalSession, bool) {

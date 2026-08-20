@@ -15,6 +15,7 @@ import (
 	"scholaroscope-temporal-service/internal/health"
 	"scholaroscope-temporal-service/internal/launch"
 	"scholaroscope-temporal-service/internal/manifest"
+	"scholaroscope-temporal-service/internal/portalapi"
 	"scholaroscope-temporal-service/internal/provisioning"
 	"scholaroscope-temporal-service/internal/scheduling"
 )
@@ -68,7 +69,9 @@ func main() {
 		cfg.ScholaroscopeWebhookSecret,
 		5*time.Minute,
 		cfg.PortalSessionDuration,
+		cfg.PortalCookieSecure,
 	)
+	portalAPIHandler := portalapi.NewHandler(pool, calendarService)
 
 	mux := http.NewServeMux()
 
@@ -101,6 +104,21 @@ func main() {
 	mux.HandleFunc("POST /portal/launch/exchange", launchHandler.Exchange)
 	mux.HandleFunc("GET /portal/session", launchHandler.Session)
 	mux.HandleFunc("POST /portal/logout", launchHandler.Logout)
+
+	// Workspace-implicit portal API routes.
+	mux.HandleFunc("GET /api/v1/workspace", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Workspace))
+	mux.HandleFunc("GET /api/v1/calendar", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.GetCalendar))
+	mux.HandleFunc("PUT /api/v1/calendar", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.PutCalendar))
+	mux.HandleFunc("GET /api/v1/teachers", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Teachers))
+	mux.HandleFunc("GET /api/v1/availability", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Availability))
+	mux.HandleFunc("GET /api/v1/teaching-demands", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.TeachingDemands))
+	mux.HandleFunc("GET /api/v1/rooms", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Rooms))
+	mux.HandleFunc("POST /api/v1/rooms", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Rooms))
+	mux.HandleFunc("GET /api/v1/timetables", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Timetables))
+	mux.HandleFunc("GET /api/v1/conflicts", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Conflicts))
+	mux.HandleFunc("POST /api/v1/timetable-versions/{versionId}/validate", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.ValidateVersion))
+	mux.HandleFunc("POST /api/v1/timetable-versions/{versionId}/publish", launchHandler.RequirePortalSession("timetable.publish", portalAPIHandler.PublishVersion))
+
 	mux.HandleFunc("POST /events/session.created",      eventHandler.Deprecated)
 	mux.HandleFunc("POST /events/session.deleted",      eventHandler.Deprecated)
 	mux.HandleFunc("POST /events/teacher.assigned",     eventHandler.Deprecated)
@@ -108,7 +126,29 @@ func main() {
 	mux.HandleFunc("POST /events/org.calendar.updated", eventHandler.Deprecated)
 
 	log.Printf("temporal service: listening on :%s", cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, mux); err != nil {
+	if err := http.ListenAndServe(":"+cfg.Port, withCORS(mux, cfg.CORSAllowedOrigins)); err != nil {
 		log.Fatalf("server: %v", err)
 	}
+}
+
+func withCORS(next http.Handler, allowedOrigins []string) http.Handler {
+	allowed := map[string]bool{}
+	for _, origin := range allowedOrigins {
+		allowed[origin] = true
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if allowed[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Scholaroscope-Timestamp, X-Scholaroscope-Signature")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

@@ -3,6 +3,7 @@ package calendar
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,15 @@ type CreateCalendarInput struct {
 // CreateCalendarWithSlots creates a new calendar version and generates
 // all time slots from it in one operation. Does not activate it.
 func (s *Service) CreateCalendarWithSlots(ctx context.Context, orgID uuid.UUID, input *CreateCalendarInput) (*OrgCalendarVersion, []TimeSlot, error) {
+	if len(input.LearningDays) == 0 {
+		return nil, nil, fmt.Errorf("calendar service: at least one learning day is required")
+	}
+	if input.SlotDurationMinutes <= 0 {
+		return nil, nil, fmt.Errorf("calendar service: slot duration must be positive")
+	}
+	if !input.DayEndTime.After(input.DayStartTime) {
+		return nil, nil, fmt.Errorf("calendar service: day end time must be after start time")
+	}
 	// Determine next version number for this org
 	nextVersion, err := s.repo.NextVersionNumber(ctx, orgID)
 	if err != nil {
@@ -37,7 +47,7 @@ func (s *Service) CreateCalendarWithSlots(ctx context.Context, orgID uuid.UUID, 
 		ID:                  uuid.New(),
 		OrgID:               orgID,
 		VersionNumber:       nextVersion,
-		LearningDays:        input.LearningDays,
+		LearningDays:        normalizeLearningDays(input.LearningDays),
 		DayStartTime:        input.DayStartTime,
 		DayEndTime:          input.DayEndTime,
 		SlotDurationMinutes: input.SlotDurationMinutes,
@@ -78,7 +88,7 @@ func generateTimeSlots(v *OrgCalendarVersion) []TimeSlot {
 	var slots []TimeSlot
 
 	for _, dayName := range v.LearningDays {
-		dayOfWeek, ok := DayOfWeekFromString[dayName]
+		dayOfWeek, ok := DayOfWeekFromString[strings.ToUpper(dayName)]
 		if !ok {
 			continue
 		}
@@ -113,6 +123,17 @@ func generateTimeSlots(v *OrgCalendarVersion) []TimeSlot {
 	return slots
 }
 
+func normalizeLearningDays(days []string) []string {
+	normalized := make([]string, 0, len(days))
+	for _, day := range days {
+		value := strings.ToUpper(strings.TrimSpace(day))
+		if _, ok := DayOfWeekFromString[value]; ok {
+			normalized = append(normalized, value)
+		}
+	}
+	return normalized
+}
+
 func resolveSlotType(start, end time.Time, breaks []BreakWindow) SlotType {
 	for _, b := range breaks {
 		breakStart, err1 := time.Parse("15:04", b.StartTime)
@@ -130,4 +151,12 @@ func resolveSlotType(start, end time.Time, breaks []BreakWindow) SlotType {
 // GetSlotsForVersion exposes slot retrieval for event handlers.
 func (s *Service) GetSlotsForVersion(ctx context.Context, calendarVersionID uuid.UUID) ([]TimeSlot, error) {
 	return s.repo.GetTimeSlotsForVersion(ctx, calendarVersionID)
+}
+
+func (s *Service) GetActiveCalendar(ctx context.Context, orgID uuid.UUID) (*OrgCalendarVersion, error) {
+	return s.repo.GetActiveCalendarVersion(ctx, orgID)
+}
+
+func (s *Service) ActivateCalendar(ctx context.Context, orgID, versionID uuid.UUID) error {
+	return s.repo.ActivateCalendarVersion(ctx, orgID, versionID)
 }

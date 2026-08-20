@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { RequireSession } from "../../components/RequireSession";
 import { apiGet, apiSend } from "../../lib/api";
 
@@ -9,12 +9,18 @@ export default function ConflictsPage() {
   const [conflictId, setConflictId] = useState("");
   const [result, setResult] = useState<unknown>(null);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    apiGet("/api/v1/conflicts")
+      .then(setResult)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
+  }, []);
 
   return (
     <RequireSession>
       {(session) => (
         <>
           <h2>Conflict inspection and resolution</h2>
+          <p className="muted">Summary is loaded from workspace-implicit portal APIs. Legacy calendar-specific inspection remains protected below.</p>
           <div className="toolbar">
             <input value={calendarVersionId} onChange={(event) => setCalendarVersionId(event.target.value)} placeholder="Calendar version UUID" />
             <button
