@@ -6,6 +6,7 @@ Current local command pattern:
 
 ```bash
 psql "$TEMPORAL_DATABASE_URL" -f migrations/000001_initial_external_timetable_schema.up.sql
+psql "$TEMPORAL_DATABASE_URL" -f migrations/000002_workspace_reference_uniqueness.up.sql
 ```
 
 Rollback for local development:
@@ -15,3 +16,18 @@ psql "$TEMPORAL_DATABASE_URL" -f migrations/000001_initial_external_timetable_sc
 ```
 
 Production migration execution should be run by deployment orchestration with backups and health checks. Do not start the service against an undocumented pre-created schema.
+
+Apply every ordered migration. Do not stop after `000001`; `000002` adds the
+unique workspace reference target required by idempotent bootstrap
+`ON CONFLICT (scholaroscope_workspace_ref, scholaroscope_organization_ref)`.
+
+Production deployment should:
+
+1. back up the temporal PostgreSQL database;
+2. apply ordered `*.up.sql` files exactly once through deployment orchestration;
+3. run `GET /health/ready`;
+4. deploy the Go API only after readiness succeeds;
+5. deploy the portal after the API URL and cookie settings are correct.
+
+Rollback is limited to explicit `*.down.sql` files and should not be used after
+publication data exists without a data-retention plan.

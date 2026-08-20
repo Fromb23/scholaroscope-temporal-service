@@ -1,6 +1,7 @@
 # Temporal Integration Contracts
 
-Status: Stage 0 contract definition. Implementation is added in later staged commits.
+Status: launch/session contract and workspace-implicit management API are
+implemented for development.
 
 ## Webhook envelope
 
@@ -82,3 +83,72 @@ The launch grant binds:
 - correlation ID.
 
 Temporal consumes the grant once and creates a portal session. Actor/workspace are read from the grant only, never from URL parameters.
+## Remote manifest
+
+Temporal exposes `GET /plugin/manifest.json` with:
+
+- `plugin_key: timetable`;
+- `requires: ["notifications"]`;
+- timetable capability declarations;
+- `config_schema` containing `temporal_api_base_url`, `temporal_launch_exchange_url`, `temporal_webhook_url`, and `signing_key_id`;
+- protocol metadata for signed installation-aware integration envelopes;
+- `contributes: {}` because no additional Scholaroscope contribution type is required for the current integration.
+
+## Management route authentication
+
+Temporal management routes require a valid `temporal_portal_session` cookie
+created by `/portal/launch/exchange`. The middleware verifies session expiry and
+revocation, active installation/workspace state, exact workspace UUID match
+against `{orgId}`, and the required timetable permission. Legacy `/events/*`
+routes are removed from the mutation path and return `410 Gone`.
+
+## Workspace-implicit management API
+
+The portal uses session-derived workspace identity for these development
+management endpoints:
+
+- `GET /api/v1/workspace`
+- `GET /api/v1/calendar`
+- `PUT /api/v1/calendar`
+- `GET /api/v1/teachers`
+- `GET /api/v1/availability`
+- `GET /api/v1/teaching-demands`
+- `GET /api/v1/rooms`
+- `POST /api/v1/rooms`
+- `GET /api/v1/timetables`
+- `GET /api/v1/conflicts`
+- `POST /api/v1/timetable-versions/{version_uuid}/validate`
+- `POST /api/v1/timetable-versions/{version_uuid}/publish`
+
+Legacy `/orgs/{orgId}/...` routes remain guarded by the portal session and must
+match the authenticated workspace UUID before serving data or accepting
+mutations.
+
+## Portal routes
+
+The independent portal frontend exposes:
+
+- `/`
+- `/calendar`
+- `/availability`
+- `/rooms`
+- `/demand`
+- `/timetables`
+- `/timetables/new`
+- `/conflicts`
+- `/publication`
+
+Direct unauthenticated access renders the session-expired state and instructs the
+manager to relaunch from Scholaroscope. There is no standalone username/password
+login.
+
+## Development environment variables
+
+- `TEMPORAL_PORTAL_PUBLIC_URL`
+- `TEMPORAL_PORTAL_RETURN_URL`
+- `TEMPORAL_PORTAL_COOKIE_SECURE`
+- `TEMPORAL_CORS_ALLOWED_ORIGINS`
+
+`TEMPORAL_PORTAL_COOKIE_SECURE` defaults to secure production behavior unless
+the configured portal public URL is a local HTTP development URL. CORS supports
+credentialed launch/session requests only for configured origins.

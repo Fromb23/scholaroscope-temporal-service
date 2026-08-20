@@ -12,7 +12,10 @@ import (
 	"scholaroscope-temporal-service/internal/conflict"
 	"scholaroscope-temporal-service/internal/db"
 	"scholaroscope-temporal-service/internal/events"
+	"scholaroscope-temporal-service/internal/health"
 	"scholaroscope-temporal-service/internal/launch"
+	"scholaroscope-temporal-service/internal/manifest"
+	"scholaroscope-temporal-service/internal/portalapi"
 	"scholaroscope-temporal-service/internal/provisioning"
 	"scholaroscope-temporal-service/internal/scheduling"
 )
@@ -56,47 +59,96 @@ func main() {
 		cfg.ScholaroscopeWebhookSecret,
 		cfg.ScholaroscopeAllowedTimestamp,
 	)
+	manifestHandler := manifest.NewHandler(manifest.Config{
+		PortalPublicURL:         cfg.PortalPublicURL,
+		ScholaroscopeWebhookURL: cfg.ScholaroscopeWebhookURL,
+	})
+	healthHandler := health.NewHandler(pool, cfg)
 	launchHandler := launch.NewHandler(
 		launchRepo,
 		cfg.ScholaroscopeWebhookSecret,
 		5*time.Minute,
+		cfg.PortalSessionDuration,
+		cfg.PortalCookieSecure,
 	)
+	portalAPIHandler := portalapi.NewHandler(pool, calendarService)
 
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("GET /health/live", healthHandler.Live)
+	mux.HandleFunc("GET /health/ready", healthHandler.Ready)
+	mux.HandleFunc("GET /plugin/manifest.json", manifestHandler.PluginManifest)
+
 	// Calendar routes
-	mux.HandleFunc("POST /orgs/{orgId}/calendar",                        calendarHandler.CreateCalendar)
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/active",                  calendarHandler.GetActiveCalendar)
-	mux.HandleFunc("POST /orgs/{orgId}/calendar/{versionId}/activate",   calendarHandler.ActivateCalendar)
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/slots",       calendarHandler.GetTimeSlots)
+	mux.HandleFunc("POST /orgs/{orgId}/calendar",                        launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.CreateCalendar))
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/active",                  launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.GetActiveCalendar))
+	mux.HandleFunc("POST /orgs/{orgId}/calendar/{versionId}/activate",   launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.ActivateCalendar))
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/slots",       launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.GetTimeSlots))
 
 	// Scheduling routes
-	mux.HandleFunc("POST /orgs/{orgId}/sessions/{sessionId}/schedule",   schedulingHandler.ScheduleSession)
-	mux.HandleFunc("DELETE /orgs/{orgId}/sessions/{sessionId}/schedule", schedulingHandler.UnscheduleSession)
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/timetable",   schedulingHandler.GetTimetable)
+	mux.HandleFunc("POST /orgs/{orgId}/sessions/{sessionId}/schedule",   launchHandler.RequirePortalPermission("timetable.manage", schedulingHandler.ScheduleSession))
+	mux.HandleFunc("DELETE /orgs/{orgId}/sessions/{sessionId}/schedule", launchHandler.RequirePortalPermission("timetable.manage", schedulingHandler.UnscheduleSession))
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/timetable",   launchHandler.RequirePortalPermission("timetable.manage", schedulingHandler.GetTimetable))
 
 	// Availability routes
-	mux.HandleFunc("PUT /orgs/{orgId}/teachers/{teacherId}/availability", availabilityHandler.SetAvailability)
-	mux.HandleFunc("GET /orgs/{orgId}/teachers/{teacherId}/availability", availabilityHandler.GetAvailability)
+	mux.HandleFunc("PUT /orgs/{orgId}/teachers/{teacherId}/availability", launchHandler.RequirePortalPermission("timetable.manage", availabilityHandler.SetAvailability))
+	mux.HandleFunc("GET /orgs/{orgId}/teachers/{teacherId}/availability", launchHandler.RequirePortalPermission("timetable.manage", availabilityHandler.GetAvailability))
 
 	// Conflict routes
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/conflicts",   conflictHandler.ListUnresolved)
-	mux.HandleFunc("POST /orgs/{orgId}/conflicts/{conflictId}/resolve",  conflictHandler.Resolve)
-	mux.HandleFunc("GET /orgs/{orgId}/conflicts/summary",                conflictHandler.Summary)
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/conflicts",   launchHandler.RequirePortalPermission("timetable.manage", conflictHandler.ListUnresolved))
+	mux.HandleFunc("POST /orgs/{orgId}/conflicts/{conflictId}/resolve",  launchHandler.RequirePortalPermission("timetable.conflicts.resolve", conflictHandler.Resolve))
+	mux.HandleFunc("GET /orgs/{orgId}/conflicts/summary",                launchHandler.RequirePortalPermission("timetable.manage", conflictHandler.Summary))
 
 	// Kernel event webhook routes
 	mux.HandleFunc("POST /integration/scholaroscope/events", provisioningHandler.HandleScholaroscopeEvent)
 	mux.HandleFunc("POST /portal/launch/exchange", launchHandler.Exchange)
 	mux.HandleFunc("GET /portal/session", launchHandler.Session)
 	mux.HandleFunc("POST /portal/logout", launchHandler.Logout)
-	mux.HandleFunc("POST /events/session.created",      eventHandler.OnSessionCreated)
-	mux.HandleFunc("POST /events/session.deleted",      eventHandler.OnSessionDeleted)
-	mux.HandleFunc("POST /events/teacher.assigned",     eventHandler.OnTeacherAssigned)
-	mux.HandleFunc("POST /events/teacher.unassigned",   eventHandler.OnTeacherUnassigned)
-	mux.HandleFunc("POST /events/org.calendar.updated", eventHandler.OnOrgCalendarUpdated)
+
+	// Workspace-implicit portal API routes.
+	mux.HandleFunc("GET /api/v1/workspace", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Workspace))
+	mux.HandleFunc("GET /api/v1/calendar", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.GetCalendar))
+	mux.HandleFunc("PUT /api/v1/calendar", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.PutCalendar))
+	mux.HandleFunc("GET /api/v1/teachers", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Teachers))
+	mux.HandleFunc("GET /api/v1/availability", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Availability))
+	mux.HandleFunc("GET /api/v1/teaching-demands", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.TeachingDemands))
+	mux.HandleFunc("GET /api/v1/rooms", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Rooms))
+	mux.HandleFunc("POST /api/v1/rooms", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Rooms))
+	mux.HandleFunc("GET /api/v1/timetables", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Timetables))
+	mux.HandleFunc("GET /api/v1/conflicts", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Conflicts))
+	mux.HandleFunc("POST /api/v1/timetable-versions/{versionId}/validate", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.ValidateVersion))
+	mux.HandleFunc("POST /api/v1/timetable-versions/{versionId}/publish", launchHandler.RequirePortalSession("timetable.publish", portalAPIHandler.PublishVersion))
+
+	mux.HandleFunc("POST /events/session.created",      eventHandler.Deprecated)
+	mux.HandleFunc("POST /events/session.deleted",      eventHandler.Deprecated)
+	mux.HandleFunc("POST /events/teacher.assigned",     eventHandler.Deprecated)
+	mux.HandleFunc("POST /events/teacher.unassigned",   eventHandler.Deprecated)
+	mux.HandleFunc("POST /events/org.calendar.updated", eventHandler.Deprecated)
 
 	log.Printf("temporal service: listening on :%s", cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, mux); err != nil {
+	if err := http.ListenAndServe(":"+cfg.Port, withCORS(mux, cfg.CORSAllowedOrigins)); err != nil {
 		log.Fatalf("server: %v", err)
 	}
+}
+
+func withCORS(next http.Handler, allowedOrigins []string) http.Handler {
+	allowed := map[string]bool{}
+	for _, origin := range allowedOrigins {
+		allowed[origin] = true
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if allowed[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Scholaroscope-Timestamp, X-Scholaroscope-Signature")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
