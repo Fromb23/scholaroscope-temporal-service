@@ -3,14 +3,14 @@ package provisioning
 import "github.com/google/uuid"
 
 type BootstrapPayload struct {
-	ScholaroscopeWorkspaceRef    string `json:"scholaroscope_workspace_ref"`
-	ScholaroscopeOrganizationRef string `json:"scholaroscope_organization_ref"`
-	DisplayName                  string `json:"display_name"`
-	Timezone                     string `json:"timezone"`
-	PluginInstallationRef        string `json:"plugin_installation_ref"`
-	SigningKeyID                 string `json:"signing_key_id"`
-	SigningSecret                string `json:"signing_secret"`
-	CallbackURL                  string `json:"callback_url"`
+	ScholaroscopeWorkspaceRef    string              `json:"scholaroscope_workspace_ref"`
+	ScholaroscopeOrganizationRef string              `json:"scholaroscope_organization_ref"`
+	DisplayName                  string              `json:"display_name"`
+	Timezone                     string              `json:"timezone"`
+	PluginInstallationRef        string              `json:"plugin_installation_ref"`
+	SigningKeyID                 string              `json:"signing_key_id"`
+	SigningSecret                string              `json:"signing_secret"`
+	CallbackURL                  string              `json:"callback_url"`
 	AcademicSync                 AcademicSyncPayload `json:"academic_sync"`
 }
 
@@ -39,12 +39,12 @@ type AcademicYearProjection struct {
 }
 
 type ActorProjection struct {
-	UserRef    string   `json:"user_ref"`
-	ActorUUID  string   `json:"actor_uuid"`
-	DisplayName string  `json:"display_name"`
-	Email      string   `json:"email"`
-	ActorKinds []string `json:"actor_kinds"`
-	Status     string   `json:"status"`
+	UserRef     string   `json:"user_ref"`
+	ActorUUID   string   `json:"actor_uuid"`
+	DisplayName string   `json:"display_name"`
+	Email       string   `json:"email"`
+	ActorKinds  []string `json:"actor_kinds"`
+	Status      string   `json:"status"`
 }
 
 type TermProjection struct {
@@ -62,27 +62,27 @@ type TermProjection struct {
 }
 
 type CalendarEventProjection struct {
-	EventRef        string `json:"event_ref"`
-	EventUUID       string `json:"event_uuid"`
+	EventRef         string `json:"event_ref"`
+	EventUUID        string `json:"event_uuid"`
 	AcademicYearRef  string `json:"academic_year_ref"`
 	AcademicYearUUID string `json:"academic_year_uuid"`
-	TermRef         string `json:"term_ref"`
-	TermUUID        string `json:"term_uuid"`
-	Title           string `json:"title"`
-	EventType       string `json:"event_type"`
-	StartDate       string `json:"start_date"`
-	EndDate         string `json:"end_date"`
-	AffectsLearning bool   `json:"affects_learning"`
-	Source          string `json:"source"`
+	TermRef          string `json:"term_ref"`
+	TermUUID         string `json:"term_uuid"`
+	Title            string `json:"title"`
+	EventType        string `json:"event_type"`
+	StartDate        string `json:"start_date"`
+	EndDate          string `json:"end_date"`
+	AffectsLearning  bool   `json:"affects_learning"`
+	Source           string `json:"source"`
 }
 
 type CohortProjection struct {
-	CohortRef       string `json:"cohort_ref"`
-	CohortUUID      string `json:"cohort_uuid"`
-	Name            string `json:"name"`
-	Level           string `json:"level"`
-	Stream          string `json:"stream"`
-	AcademicYearRef string `json:"academic_year_ref"`
+	CohortRef        string `json:"cohort_ref"`
+	CohortUUID       string `json:"cohort_uuid"`
+	Name             string `json:"name"`
+	Level            string `json:"level"`
+	Stream           string `json:"stream"`
+	AcademicYearRef  string `json:"academic_year_ref"`
 	AcademicYearUUID string `json:"academic_year_uuid"`
 }
 
@@ -106,19 +106,23 @@ type CohortSubjectProjection struct {
 }
 
 type TeachingAssignmentProjection struct {
-	TeachingAssignmentRef  string `json:"teaching_assignment_ref"`
-	TeachingAssignmentUUID string `json:"teaching_assignment_uuid"`
-	TeacherUUID            string `json:"teacher_uuid"`
-	CohortSubjectUUID      string `json:"cohort_subject_uuid"`
-	CohortUUID             string `json:"cohort_uuid"`
-	SubjectUUID            string `json:"subject_uuid"`
-	TeacherRef             string `json:"teacher_ref"`
-	CohortSubjectRef       string `json:"cohort_subject_ref"`
-	CohortRef              string `json:"cohort_ref"`
-	SubjectRef             string `json:"subject_ref"`
-	SubjectName            string `json:"subject_name"`
-	CohortName             string `json:"cohort_name"`
-	Status                 string `json:"status"`
+	TeachingAssignmentRef  string         `json:"teaching_assignment_ref"`
+	TeachingAssignmentUUID string         `json:"teaching_assignment_uuid"`
+	SourceModel            string         `json:"source_model"`
+	SourceID               string         `json:"source_id"`
+	TeacherUUID            string         `json:"teacher_uuid"`
+	CohortSubjectUUID      string         `json:"cohort_subject_uuid"`
+	CohortUUID             string         `json:"cohort_uuid"`
+	SubjectUUID            string         `json:"subject_uuid"`
+	TeacherRef             string         `json:"teacher_ref"`
+	CohortSubjectRef       string         `json:"cohort_subject_ref"`
+	CohortRef              string         `json:"cohort_ref"`
+	SubjectRef             string         `json:"subject_ref"`
+	SubjectName            string         `json:"subject_name"`
+	CohortName             string         `json:"cohort_name"`
+	AcademicYearRef        string         `json:"academic_year_ref"`
+	SchedulingRequirements map[string]any `json:"scheduling_requirements"`
+	Status                 string         `json:"status"`
 }
 
 type WorkspaceProvisioningResult struct {

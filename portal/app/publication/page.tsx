@@ -5,6 +5,8 @@ import { useSearchParams } from "next/navigation";
 import { RequireSession } from "../../components/RequireSession";
 import { apiGet, apiSend, type TimetableListResponse } from "../../lib/api";
 
+type PublicationResult = { status?: string; hard_conflicts?: number; soft_conflicts?: number; version_uuid?: string; changed_entries?: number };
+
 export default function PublicationPage() {
   return (
     <Suspense fallback={<section className="card">Loading publication workflow…</section>}>
@@ -18,7 +20,7 @@ function PublicationContent() {
   const [versions, setVersions] = useState<TimetableListResponse | null>(null);
   const [versionId, setVersionId] = useState(search.get("version") ?? "");
   const [reason, setReason] = useState("Published from timetable portal");
-  const [result, setResult] = useState<unknown>(null);
+  const [result, setResult] = useState<PublicationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -48,7 +50,7 @@ function PublicationContent() {
               disabled={!versionId}
               onClick={() => {
                 setError(null);
-                apiSend(`/api/v1/timetable-versions/${versionId}/validate`, "POST")
+                apiSend<PublicationResult>(`/api/v1/timetable-versions/${versionId}/validate`, "POST")
                   .then(setResult)
                   .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
               }}
@@ -60,7 +62,7 @@ function PublicationContent() {
               disabled={!versionId}
               onClick={() => {
                 setError(null);
-                apiSend(`/api/v1/timetable-versions/${versionId}/publish`, "POST", { reason })
+                apiSend<PublicationResult>(`/api/v1/timetable-versions/${versionId}/publish`, "POST", { reason })
                   .then(setResult)
                   .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
               }}
@@ -69,7 +71,7 @@ function PublicationContent() {
             </button>
           </div>
           {error ? <div className="error">{error}</div> : null}
-          {result ? <pre>{JSON.stringify(result, null, 2)}</pre> : null}
+          {result ? <section className="card"><h3>{(result.status ?? "Publication completed").replaceAll("_", " ")}</h3><p>Hard conflicts: {result.hard_conflicts ?? 0}</p><p>Soft conflicts: {result.soft_conflicts ?? 0}</p>{typeof result.changed_entries === "number" ? <p>Changed entries: {result.changed_entries}</p> : null}</section> : null}
         </section>
       )}
     </RequireSession>

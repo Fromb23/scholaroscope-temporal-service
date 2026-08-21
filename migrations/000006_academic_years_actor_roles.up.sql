@@ -1,3 +1,5 @@
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS external_academic_year (
     id uuid PRIMARY KEY,
     workspace_id uuid NOT NULL REFERENCES external_workspace(id) ON DELETE RESTRICT,
@@ -60,7 +62,7 @@ ON CONFLICT (workspace_id, actor_id, actor_kind)
 DO UPDATE SET status = EXCLUDED.status, updated_at = now();
 
 INSERT INTO external_actor_role (workspace_id, actor_id, actor_kind, status)
-SELECT eta.workspace_id, eta.teacher_uuid, 'TEACHER', 'ACTIVE'
+SELECT DISTINCT eta.workspace_id, eta.teacher_uuid, 'TEACHER', 'ACTIVE'
 FROM external_teaching_assignment eta
 WHERE eta.status = 'ACTIVE'
 ON CONFLICT (workspace_id, actor_id, actor_kind)
@@ -68,3 +70,5 @@ DO UPDATE SET status = 'ACTIVE', updated_at = now();
 
 CREATE INDEX IF NOT EXISTS external_actor_role_lookup_idx
     ON external_actor_role(workspace_id, actor_kind, status);
+
+COMMIT;

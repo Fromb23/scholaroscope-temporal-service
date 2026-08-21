@@ -7,6 +7,8 @@ Current local command pattern:
 ```bash
 psql "$TEMPORAL_DATABASE_URL" -f migrations/000001_initial_external_timetable_schema.up.sql
 psql "$TEMPORAL_DATABASE_URL" -f migrations/000002_workspace_reference_uniqueness.up.sql
+psql "$TEMPORAL_DATABASE_URL" -f migrations/000006_academic_years_actor_roles.up.sql
+psql "$TEMPORAL_DATABASE_URL" -f migrations/000007_solver_projection_integrity.up.sql
 ```
 
 Rollback for local development:
@@ -28,6 +30,11 @@ Production deployment should:
 3. run `GET /health/ready`;
 4. deploy the Go API only after readiness succeeds;
 5. deploy the portal after the API URL and cookie settings are correct.
+
+`000006` and later integrity migrations are explicitly transactional. `000007`
+adds source-aware assignment requirements, solver diagnostics, and trigger-backed
+teacher/cohort/room/resource occupancy. Apply it before deploying an API binary
+that accepts generation requests.
 
 Rollback is limited to explicit `*.down.sql` files and should not be used after
 publication data exists without a data-retention plan.
