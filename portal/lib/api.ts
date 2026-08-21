@@ -23,6 +23,15 @@ export type WorkspaceStatus = {
     display_name: string;
     actor_kind: string;
   };
+  current_academic_year?: {
+    academic_year_uuid: string;
+    academic_year_ref: string;
+    name: string;
+    start_date: string;
+    end_date: string;
+    is_current: boolean;
+    status: string;
+  } | null;
   current_term?: {
     term_uuid: string;
     name: string;
@@ -30,8 +39,25 @@ export type WorkspaceStatus = {
     start_date: string;
     end_date: string;
     status: string;
+    calendar_ready?: boolean;
+    is_current?: boolean;
+  } | null;
+  schedulable_term?: {
+    term_uuid: string;
+    name: string;
+    academic_year_label: string;
+    start_date: string;
+    end_date: string;
+    status: string;
+    calendar_ready?: boolean;
+    is_current?: boolean;
+    is_upcoming?: boolean;
   } | null;
   counts?: Record<string, number>;
+  readiness?: {
+    status: string;
+    checks: Array<{ code: string; ok: boolean }>;
+  };
 };
 
 export type CalendarVersion = {
@@ -49,7 +75,38 @@ export type CalendarVersion = {
 export type CalendarResponse = {
   status: string;
   calendar_version: CalendarVersion | null;
-  slots: unknown[];
+  slots: Array<{
+    id: string;
+    day_of_week: number;
+    start_time: string;
+    end_time: string;
+    slot_index: number;
+    slot_type: string;
+  }>;
+};
+
+export type TeacherAssignmentSummary = {
+  cohort_uuid: string;
+  cohort_name: string;
+  subject_uuid: string;
+  subject_name: string;
+  cohort_subject_uuid: string;
+  cohort_subject_ref: string;
+};
+
+export type TeacherSummary = {
+  actor_uuid: string;
+  scholaroscope_user_ref: string;
+  display_name: string;
+  actor_kind: "TEACHER";
+  actor_kinds: string[];
+  status: string;
+  assignments: TeacherAssignmentSummary[];
+};
+
+export type TeachersResponse = {
+  teachers: TeacherSummary[];
+  count: number;
 };
 
 export type TimetableListItem = {

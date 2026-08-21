@@ -53,11 +53,13 @@ function DashboardContent({
           <div className="grid">
             <section className="card">
               <h3>Academic context</h3>
-              <p>{workspace?.current_term?.academic_year_label ?? "No synchronized academic year"}</p>
+              <p>{workspace?.current_academic_year?.name ?? "No synchronized academic year"}</p>
               <p className="muted">
                 {workspace?.current_term
-                  ? `${workspace.current_term.name}: ${workspace.current_term.start_date} to ${workspace.current_term.end_date}`
-                  : "No eligible active term is synchronized."}
+                  ? `Current term: ${workspace.current_term.name} (${workspace.current_term.start_date} to ${workspace.current_term.end_date})`
+                  : workspace?.schedulable_term
+                    ? `Upcoming schedulable term: ${workspace.schedulable_term.name} (${workspace.schedulable_term.start_date} to ${workspace.schedulable_term.end_date})`
+                    : "No current or schedulable term is synchronized."}
               </p>
             </section>
             <section className="card">
@@ -74,7 +76,7 @@ function DashboardContent({
             </section>
             <section className="card">
               <h3>Integration</h3>
-              <p>{workspace?.provisioning_state ?? "Loading"}</p>
+              <p>{workspace?.readiness?.status ?? workspace?.provisioning_state ?? "Loading"}</p>
               <p className="muted">
                 Health: {workspace?.integration_health ?? "UNKNOWN"}
                 {workspace?.reconciliation_required ? " · reconciliation required" : ""}

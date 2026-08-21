@@ -89,3 +89,39 @@ textarea {
   gap: 12px;
   margin-bottom: 16px;
 }
+
+.stack {
+  display: grid;
+  gap: 16px;
+}
+
+.empty {
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  color: #475569;
+  padding: 20px;
+  background: #f8fafc;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border-bottom: 1px solid #e2e8f0;
+  padding: 10px;
+  text-align: left;
+}
+
+th {
+  color: #475569;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}

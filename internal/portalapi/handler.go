@@ -495,21 +495,56 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 		writeError(w, http.StatusNotFound, "workspace_not_found")
 		return
 	}
-	var currentTerm map[string]any
-	termRow := h.pool.QueryRow(r.Context(), `
-		SELECT id, name, academic_year_label, start_date::text, end_date::text, status
-		FROM external_academic_term
+	today := workspaceLocalDate(workspace.Timezone)
+	var currentAcademicYear map[string]any
+	yearRow := h.pool.QueryRow(r.Context(), `
+		SELECT id, scholaroscope_academic_year_ref, name, start_date::text, end_date::text, is_current, status
+		FROM external_academic_year
 		WHERE workspace_id = $1
-		  AND status IN ('OPEN', 'ACTIVE', 'READY')
-		  AND start_date <= CURRENT_DATE
-		  AND end_date >= CURRENT_DATE
+		  AND is_current = true
+		  AND status IN ('CURRENT', 'ACTIVE')
 		ORDER BY start_date DESC
 		LIMIT 1`,
 		session.WorkspaceID,
 	)
+	var yearID uuid.UUID
+	var yearRef, yearName, yearStart, yearEnd, yearStatus string
+	var yearIsCurrent bool
+	if err := yearRow.Scan(&yearID, &yearRef, &yearName, &yearStart, &yearEnd, &yearIsCurrent, &yearStatus); err == nil {
+		currentAcademicYear = map[string]any{
+			"academic_year_uuid": yearID.String(),
+			"academic_year_ref": yearRef,
+			"name": yearName,
+			"start_date": yearStart,
+			"end_date": yearEnd,
+			"is_current": yearIsCurrent,
+			"status": yearStatus,
+		}
+	}
+	academicYearParam := ""
+	if currentAcademicYear != nil {
+		academicYearParam, _ = currentAcademicYear["academic_year_uuid"].(string)
+	}
+	var currentTerm map[string]any
+	termRow := h.pool.QueryRow(r.Context(), `
+		SELECT id, name, academic_year_label, start_date::text, end_date::text, status, calendar_ready, is_frozen
+		FROM external_academic_term
+		WHERE workspace_id = $1
+		  AND status IN ('OPEN', 'ACTIVE', 'READY')
+		  AND start_date <= $2::date
+		  AND end_date >= $2::date
+		  AND is_frozen = false
+		  AND (NULLIF($3, '')::uuid IS NULL OR academic_year_uuid = NULLIF($3, '')::uuid)
+		ORDER BY start_date DESC
+		LIMIT 1`,
+		session.WorkspaceID,
+		today,
+		academicYearParam,
+	)
 	var termID uuid.UUID
 	var termName, academicYearLabel, termStart, termEnd, termStatus string
-	if err := termRow.Scan(&termID, &termName, &academicYearLabel, &termStart, &termEnd, &termStatus); err == nil {
+	var termCalendarReady, termFrozen bool
+	if err := termRow.Scan(&termID, &termName, &academicYearLabel, &termStart, &termEnd, &termStatus, &termCalendarReady, &termFrozen); err == nil {
 		currentTerm = map[string]any{
 			"term_uuid": termID.String(),
 			"name": termName,
@@ -517,13 +552,47 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 			"start_date": termStart,
 			"end_date": termEnd,
 			"status": termStatus,
+			"calendar_ready": termCalendarReady,
+			"is_current": true,
+		}
+	}
+	var schedulableTerm map[string]any
+	schedulableRow := h.pool.QueryRow(r.Context(), `
+		SELECT id, name, academic_year_label, start_date::text, end_date::text, status, calendar_ready, is_frozen
+		FROM external_academic_term
+		WHERE workspace_id = $1
+		  AND status IN ('OPEN', 'ACTIVE', 'READY')
+		  AND is_frozen = false
+		  AND end_date >= $2::date
+		  AND (NULLIF($3, '')::uuid IS NULL OR academic_year_uuid = NULLIF($3, '')::uuid)
+		ORDER BY CASE WHEN start_date <= $2::date THEN 0 ELSE 1 END, start_date
+		LIMIT 1`,
+		session.WorkspaceID,
+		today,
+		academicYearParam,
+	)
+	var schedID uuid.UUID
+	var schedName, schedYearLabel, schedStart, schedEnd, schedStatus string
+	var schedCalendarReady, schedFrozen bool
+	if err := schedulableRow.Scan(&schedID, &schedName, &schedYearLabel, &schedStart, &schedEnd, &schedStatus, &schedCalendarReady, &schedFrozen); err == nil {
+		schedulableTerm = map[string]any{
+			"term_uuid": schedID.String(),
+			"name": schedName,
+			"academic_year_label": schedYearLabel,
+			"start_date": schedStart,
+			"end_date": schedEnd,
+			"status": schedStatus,
+			"calendar_ready": schedCalendarReady,
+			"is_current": currentTerm != nil && currentTerm["term_uuid"] == schedID.String(),
+			"is_upcoming": schedStart > today,
 		}
 	}
 	counts := map[string]int{}
 	for key, query := range map[string]string{
-		"teacher_count": "SELECT COUNT(*) FROM external_actor WHERE workspace_id = $1 AND status = 'ACTIVE' AND actor_kind IN ('TEACHER', 'MANAGER')",
+		"teacher_count": "SELECT COUNT(DISTINCT teacher_uuid) FROM external_teaching_assignment WHERE workspace_id = $1 AND status = 'ACTIVE'",
 		"class_count": "SELECT COUNT(*) FROM external_cohort WHERE workspace_id = $1 AND status = 'ACTIVE'",
 		"subject_count": "SELECT COUNT(*) FROM external_subject WHERE workspace_id = $1 AND status IN ('ACTIVE', 'OFFERED', 'REACTIVATED')",
+		"cohort_subject_count": "SELECT COUNT(*) FROM external_cohort_subject WHERE workspace_id = $1 AND status = 'ACTIVE'",
 		"teaching_assignment_count": "SELECT COUNT(*) FROM external_teaching_assignment WHERE workspace_id = $1 AND status = 'ACTIVE'",
 		"timetable_count": "SELECT COUNT(*) FROM timetable WHERE workspace_id = $1",
 		"published_timetable_count": "SELECT COUNT(*) FROM timetable_version WHERE workspace_id = $1 AND status = 'PUBLISHED'",
@@ -531,6 +600,27 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 		var count int
 		if err := h.pool.QueryRow(r.Context(), query, session.WorkspaceID).Scan(&count); err == nil {
 			counts[key] = count
+		}
+	}
+	var activeCalendarCount int
+	_ = h.pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM org_calendar_version WHERE org_id = $1 AND is_active = true`, session.WorkspaceID).Scan(&activeCalendarCount)
+	readinessStatus := "READY_TO_CONFIGURE_TIMETABLE"
+	readinessChecks := []map[string]any{
+		{"code": "PLUGIN_INSTALLED", "ok": workspace.Status == "ACTIVE"},
+		{"code": "WORKSPACE_PROVISIONED", "ok": workspace.ProvisioningState == "READY"},
+		{"code": "ACADEMIC_YEAR_SYNCHRONIZED", "ok": currentAcademicYear != nil},
+		{"code": "SCHEDULABLE_TERM_SYNCHRONIZED", "ok": schedulableTerm != nil},
+		{"code": "COHORTS_SYNCHRONIZED", "ok": counts["class_count"] > 0},
+		{"code": "COHORT_SUBJECTS_SYNCHRONIZED", "ok": counts["cohort_subject_count"] > 0},
+		{"code": "TEACHING_ASSIGNMENTS_SYNCHRONIZED", "ok": counts["teaching_assignment_count"] > 0},
+		{"code": "ELIGIBLE_TEACHERS_AVAILABLE", "ok": counts["teacher_count"] > 0},
+		{"code": "BELL_PERIODS_CONFIGURED", "ok": activeCalendarCount > 0},
+		{"code": "TIMETABLE_PUBLISHED", "ok": counts["published_timetable_count"] > 0},
+	}
+	for _, check := range readinessChecks {
+		if ok, _ := check["ok"].(bool); !ok {
+			readinessStatus = fmt.Sprintf("MISSING_%s", check["code"])
+			break
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -547,9 +637,23 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 			"display_name": session.ActorDisplayName,
 			"actor_kind": session.ActorKind,
 		},
+		"current_academic_year": currentAcademicYear,
 		"current_term": currentTerm,
+		"schedulable_term": schedulableTerm,
 		"counts": counts,
+		"readiness": map[string]any{
+			"status": readinessStatus,
+			"checks": readinessChecks,
+		},
 	})
+}
+
+func workspaceLocalDate(timezoneName string) string {
+	location, err := time.LoadLocation(strings.TrimSpace(timezoneName))
+	if err != nil {
+		location = time.UTC
+	}
+	return time.Now().In(location).Format("2006-01-02")
 }
 
 func (h *Handler) GetCalendar(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
@@ -592,7 +696,7 @@ func (h *Handler) PutCalendar(w http.ResponseWriter, r *http.Request, session *l
 		writeError(w, http.StatusBadRequest, "invalid_day_end_time")
 		return
 	}
-	version, slots, err := h.calendarService.CreateCalendarWithSlots(r.Context(), session.WorkspaceID, &calendar.CreateCalendarInput{
+	version, slots, err := h.calendarService.CreateCalendarWithSlotsActivated(r.Context(), session.WorkspaceID, &calendar.CreateCalendarInput{
 		LearningDays:        body.LearningDays,
 		DayStartTime:        startTime,
 		DayEndTime:          endTime,
@@ -603,7 +707,6 @@ func (h *Handler) PutCalendar(w http.ResponseWriter, r *http.Request, session *l
 		writeError(w, http.StatusBadRequest, "calendar_validation_failed")
 		return
 	}
-	_ = h.calendarService.ActivateCalendar(r.Context(), session.WorkspaceID, version.ID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"calendar_version": version,
 		"slots": slots,
@@ -655,11 +758,24 @@ func (h *Handler) CalendarExceptions(w http.ResponseWriter, r *http.Request, ses
 
 func (h *Handler) Teachers(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
 	rows, err := h.pool.Query(r.Context(), `
-		SELECT id, scholaroscope_user_ref, display_name, actor_kind, status
-		FROM external_actor
-		WHERE workspace_id = $1
-		  AND status = 'ACTIVE'
-		ORDER BY display_name`,
+		SELECT a.id, a.scholaroscope_user_ref, a.display_name, a.status,
+		       jsonb_agg(DISTINCT jsonb_build_object(
+		         'cohort_uuid', eta.cohort_uuid::text,
+		         'cohort_name', eta.cohort_name,
+		         'subject_uuid', eta.subject_uuid::text,
+		         'subject_name', eta.subject_name,
+		         'cohort_subject_uuid', eta.cohort_subject_uuid::text,
+		         'cohort_subject_ref', eta.cohort_subject_ref
+		       )) AS assignments
+		FROM external_actor a
+		JOIN external_teaching_assignment eta
+		  ON eta.workspace_id = a.workspace_id
+		 AND eta.teacher_uuid = a.id
+		 AND eta.status = 'ACTIVE'
+		WHERE a.workspace_id = $1
+		  AND a.status = 'ACTIVE'
+		GROUP BY a.id, a.scholaroscope_user_ref, a.display_name, a.status
+		ORDER BY a.display_name`,
 		session.WorkspaceID,
 	)
 	if err != nil {
@@ -670,17 +786,22 @@ func (h *Handler) Teachers(w http.ResponseWriter, r *http.Request, session *laun
 	actors := []map[string]any{}
 	for rows.Next() {
 		var id uuid.UUID
-		var ref, name, kind, status string
-		if err := rows.Scan(&id, &ref, &name, &kind, &status); err != nil {
+		var ref, name, status string
+		var assignments []byte
+		if err := rows.Scan(&id, &ref, &name, &status, &assignments); err != nil {
 			writeError(w, http.StatusInternalServerError, "teachers_scan_failed")
 			return
 		}
+		var assignmentItems []map[string]any
+		_ = json.Unmarshal(assignments, &assignmentItems)
 		actors = append(actors, map[string]any{
 			"actor_uuid": id,
 			"scholaroscope_user_ref": ref,
 			"display_name": name,
-			"actor_kind": kind,
+			"actor_kind": "TEACHER",
+			"actor_kinds": []string{"TEACHER"},
 			"status": status,
+			"assignments": assignmentItems,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"teachers": actors, "count": len(actors)})
@@ -1252,7 +1373,17 @@ func parseRequiredUUID(value string, code string) (uuid.UUID, error) {
 
 func (h *Handler) referencesBelong(ctx context.Context, workspaceID uuid.UUID, teacherID, cohortID, subjectID, cohortSubjectID uuid.UUID, roomID *uuid.UUID) bool {
 	var count int
-	if err := h.pool.QueryRow(ctx, `SELECT COUNT(*) FROM external_actor WHERE workspace_id = $1 AND id = $2 AND status = 'ACTIVE'`, workspaceID, teacherID).Scan(&count); err != nil || count != 1 {
+	if err := h.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM external_teaching_assignment
+		WHERE workspace_id = $1
+		  AND teacher_uuid = $2
+		  AND cohort_uuid = $3
+		  AND subject_uuid = $4
+		  AND cohort_subject_uuid = $5
+		  AND status = 'ACTIVE'`,
+		workspaceID, teacherID, cohortID, subjectID, cohortSubjectID,
+	).Scan(&count); err != nil || count != 1 {
 		return false
 	}
 	if err := h.pool.QueryRow(ctx, `SELECT COUNT(*) FROM external_cohort WHERE workspace_id = $1 AND id = $2 AND status = 'ACTIVE'`, workspaceID, cohortID).Scan(&count); err != nil || count != 1 {

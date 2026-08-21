@@ -158,6 +158,18 @@ type execer interface {
 }
 
 func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uuid.UUID, sync AcademicSyncPayload) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE external_actor_role
+		SET status = 'DISABLED', updated_at = now()
+		WHERE workspace_id = $1`, workspaceID); err != nil {
+		return fmt.Errorf("provisioning repo: disable stale actor roles: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE external_teaching_assignment
+		SET status = 'DISABLED', updated_at = now()
+		WHERE workspace_id = $1`, workspaceID); err != nil {
+		return fmt.Errorf("provisioning repo: disable stale assignments: %w", err)
+	}
 	for _, actor := range sync.Actors {
 		actorID, err := uuid.Parse(actor.ActorUUID)
 		if err != nil {
@@ -188,6 +200,69 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 		if err != nil {
 			return fmt.Errorf("provisioning repo: upsert actor: %w", err)
 		}
+		if len(actor.ActorKinds) == 0 {
+			actor.ActorKinds = []string{kind}
+		}
+		for _, actorKind := range actor.ActorKinds {
+			actorKind = strings.ToUpper(strings.TrimSpace(actorKind))
+			if actorKind == "" {
+				continue
+			}
+			_, err = tx.Exec(ctx, `
+				INSERT INTO external_actor_role (workspace_id, actor_id, actor_kind, status)
+				VALUES ($1, $2, $3, COALESCE(NULLIF($4, ''), 'ACTIVE'))
+				ON CONFLICT (workspace_id, actor_id, actor_kind)
+				DO UPDATE SET status = EXCLUDED.status, updated_at = now()`,
+				workspaceID, actorID, actorKind, actor.Status,
+			)
+			if err != nil {
+				return fmt.Errorf("provisioning repo: upsert actor role: %w", err)
+			}
+		}
+	}
+	for _, academicYear := range sync.AcademicYears {
+		academicYearID, err := uuid.Parse(academicYear.AcademicYearUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid academic year uuid: %w", err)
+		}
+		startDate, err := time.Parse("2006-01-02", academicYear.StartDate)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid academic year start date: %w", err)
+		}
+		endDate, err := time.Parse("2006-01-02", academicYear.EndDate)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid academic year end date: %w", err)
+		}
+		status := strings.ToUpper(strings.TrimSpace(academicYear.Status))
+		if status == "" {
+			if academicYear.IsCurrent {
+				status = "CURRENT"
+			} else {
+				status = "ACTIVE"
+			}
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO external_academic_year (
+				id, workspace_id, scholaroscope_academic_year_ref, name, start_date, end_date,
+				is_current, status, curriculum_ref, curriculum_name
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT (workspace_id, scholaroscope_academic_year_ref)
+			DO UPDATE SET name = EXCLUDED.name,
+			              start_date = EXCLUDED.start_date,
+			              end_date = EXCLUDED.end_date,
+			              is_current = EXCLUDED.is_current,
+			              status = EXCLUDED.status,
+			              curriculum_ref = EXCLUDED.curriculum_ref,
+			              curriculum_name = EXCLUDED.curriculum_name,
+			              updated_at = now()`,
+			academicYearID, workspaceID, academicYear.AcademicYearRef, academicYear.Name,
+			startDate, endDate, academicYear.IsCurrent, status, academicYear.CurriculumRef,
+			academicYear.CurriculumName,
+		)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: upsert academic year: %w", err)
+		}
 	}
 	for _, term := range sync.Terms {
 		termID, err := uuid.Parse(term.TermUUID)
@@ -202,14 +277,33 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 		if err != nil {
 			return fmt.Errorf("provisioning repo: invalid term end date: %w", err)
 		}
+		var academicYearID *uuid.UUID
+		if strings.TrimSpace(term.AcademicYearUUID) != "" {
+			parsed, err := uuid.Parse(term.AcademicYearUUID)
+			if err != nil {
+				return fmt.Errorf("provisioning repo: invalid term academic year uuid: %w", err)
+			}
+			academicYearID = &parsed
+		}
 		_, err = tx.Exec(ctx, `
-			INSERT INTO external_academic_term (id, workspace_id, scholaroscope_term_ref, name, academic_year_label, start_date, end_date, status)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO external_academic_term (
+				id, workspace_id, scholaroscope_term_ref, name, academic_year_label,
+				start_date, end_date, status, academic_year_uuid,
+				scholaroscope_academic_year_ref, calendar_ready, is_frozen
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			ON CONFLICT (workspace_id, scholaroscope_term_ref)
 			DO UPDATE SET name = EXCLUDED.name, academic_year_label = EXCLUDED.academic_year_label,
 			              start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date,
-			              status = EXCLUDED.status, updated_at = now()`,
-			termID, workspaceID, term.TermRef, term.Name, term.AcademicYearLabel, startDate, endDate, term.Status,
+			              status = EXCLUDED.status,
+			              academic_year_uuid = EXCLUDED.academic_year_uuid,
+			              scholaroscope_academic_year_ref = EXCLUDED.scholaroscope_academic_year_ref,
+			              calendar_ready = EXCLUDED.calendar_ready,
+			              is_frozen = EXCLUDED.is_frozen,
+			              updated_at = now()`,
+			termID, workspaceID, term.TermRef, term.Name, term.AcademicYearLabel,
+			startDate, endDate, term.Status, academicYearID, term.AcademicYearRef,
+			term.CalendarReady, term.IsFrozen,
 		)
 		if err != nil {
 			return fmt.Errorf("provisioning repo: upsert term: %w", err)
@@ -228,6 +322,14 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 			}
 			termID = &parsed
 		}
+		var academicYearID *uuid.UUID
+		if strings.TrimSpace(event.AcademicYearUUID) != "" {
+			parsed, err := uuid.Parse(event.AcademicYearUUID)
+			if err != nil {
+				return fmt.Errorf("provisioning repo: invalid calendar event academic year uuid: %w", err)
+			}
+			academicYearID = &parsed
+		}
 		startDate, err := time.Parse("2006-01-02", event.StartDate)
 		if err != nil {
 			return fmt.Errorf("provisioning repo: invalid calendar event start date: %w", err)
@@ -242,13 +344,16 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 		}
 		_, err = tx.Exec(ctx, `
 			INSERT INTO external_calendar_event (
-				id, workspace_id, scholaroscope_event_ref, term_uuid,
+				id, workspace_id, scholaroscope_event_ref, academic_year_uuid,
+				scholaroscope_academic_year_ref, term_uuid,
 				scholaroscope_term_ref, title, event_kind, starts_on, ends_on,
 				affects_learning, source, status
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'ACTIVE')
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'ACTIVE')
 			ON CONFLICT (workspace_id, scholaroscope_event_ref)
-			DO UPDATE SET term_uuid = EXCLUDED.term_uuid,
+			DO UPDATE SET academic_year_uuid = EXCLUDED.academic_year_uuid,
+			              scholaroscope_academic_year_ref = EXCLUDED.scholaroscope_academic_year_ref,
+			              term_uuid = EXCLUDED.term_uuid,
 			              scholaroscope_term_ref = EXCLUDED.scholaroscope_term_ref,
 			              title = EXCLUDED.title,
 			              event_kind = EXCLUDED.event_kind,
@@ -261,6 +366,8 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 			eventID,
 			workspaceID,
 			event.EventRef,
+			academicYearID,
+			event.AcademicYearRef,
 			termID,
 			event.TermRef,
 			event.Title,
@@ -279,13 +386,24 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 		if err != nil {
 			return fmt.Errorf("provisioning repo: invalid cohort uuid: %w", err)
 		}
+		var academicYearID *uuid.UUID
+		if strings.TrimSpace(cohort.AcademicYearUUID) != "" {
+			parsed, err := uuid.Parse(cohort.AcademicYearUUID)
+			if err != nil {
+				return fmt.Errorf("provisioning repo: invalid cohort academic year uuid: %w", err)
+			}
+			academicYearID = &parsed
+		}
 		_, err = tx.Exec(ctx, `
-			INSERT INTO external_cohort (id, workspace_id, scholaroscope_cohort_ref, name, level, stream, academic_year_ref)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO external_cohort (id, workspace_id, scholaroscope_cohort_ref, name, level, stream, academic_year_ref, academic_year_uuid)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (workspace_id, scholaroscope_cohort_ref)
 			DO UPDATE SET name = EXCLUDED.name, level = EXCLUDED.level, stream = EXCLUDED.stream,
-			              academic_year_ref = EXCLUDED.academic_year_ref, status = 'ACTIVE', updated_at = now()`,
-			cohortID, workspaceID, cohort.CohortRef, cohort.Name, cohort.Level, cohort.Stream, cohort.AcademicYearRef,
+			              academic_year_ref = EXCLUDED.academic_year_ref,
+			              academic_year_uuid = EXCLUDED.academic_year_uuid,
+			              status = 'ACTIVE', updated_at = now()`,
+			cohortID, workspaceID, cohort.CohortRef, cohort.Name, cohort.Level, cohort.Stream,
+			cohort.AcademicYearRef, academicYearID,
 		)
 		if err != nil {
 			return fmt.Errorf("provisioning repo: upsert cohort: %w", err)

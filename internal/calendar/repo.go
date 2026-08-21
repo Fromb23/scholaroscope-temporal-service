@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,13 +22,24 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 
 // CreateCalendarVersion inserts a new org_calendar_version row.
 func (r *Repo) CreateCalendarVersion(ctx context.Context, v *OrgCalendarVersion) error {
+	if _, err := insertCalendarVersion(ctx, r.pool, v); err != nil {
+		return err
+	}
+	return nil
+}
+
+type calendarExecer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+func insertCalendarVersion(ctx context.Context, execer calendarExecer, v *OrgCalendarVersion) (pgconn.CommandTag, error) {
 	learningDaysJSON, err := json.Marshal(v.LearningDays)
 	if err != nil {
-		return fmt.Errorf("calendar repo: marshal learning_days: %w", err)
+		return pgconn.CommandTag{}, fmt.Errorf("calendar repo: marshal learning_days: %w", err)
 	}
 	breakStructureJSON, err := json.Marshal(v.BreakStructure)
 	if err != nil {
-		return fmt.Errorf("calendar repo: marshal break_structure: %w", err)
+		return pgconn.CommandTag{}, fmt.Errorf("calendar repo: marshal break_structure: %w", err)
 	}
 
 	query := `
@@ -41,7 +53,7 @@ func (r *Repo) CreateCalendarVersion(ctx context.Context, v *OrgCalendarVersion)
 			$8, $9
 		)`
 
-	_, err = r.pool.Exec(ctx, query,
+	tag, err := execer.Exec(ctx, query,
 		v.ID,
 		v.OrgID,
 		v.VersionNumber,
@@ -53,7 +65,66 @@ func (r *Repo) CreateCalendarVersion(ctx context.Context, v *OrgCalendarVersion)
 		v.IsActive,
 	)
 	if err != nil {
-		return fmt.Errorf("calendar repo: create version: %w", err)
+		return pgconn.CommandTag{}, fmt.Errorf("calendar repo: create version: %w", err)
+	}
+	return tag, nil
+}
+
+func (r *Repo) CreateCalendarVersionWithSlotsActivated(ctx context.Context, v *OrgCalendarVersion, slots []TimeSlot) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("calendar repo: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	insertVersion := *v
+	insertVersion.IsActive = false
+	if _, err := insertCalendarVersion(ctx, tx, &insertVersion); err != nil {
+		return err
+	}
+	for _, s := range slots {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO time_slot (
+				id, org_id, calendar_version_id, day_of_week,
+				start_time, end_time, slot_index, slot_type
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			s.ID,
+			s.OrgID,
+			s.CalendarVersionID,
+			s.DayOfWeek,
+			s.StartTime.Format("15:04:05"),
+			s.EndTime.Format("15:04:05"),
+			s.SlotIndex,
+			string(s.SlotType),
+		); err != nil {
+			return fmt.Errorf("calendar repo: insert slot: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE org_calendar_version
+		SET is_active = FALSE, updated_at = NOW()
+		WHERE org_id = $1 AND id <> $2`,
+		v.OrgID,
+		v.ID,
+	); err != nil {
+		return fmt.Errorf("calendar repo: deactivate old versions: %w", err)
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE org_calendar_version
+		SET is_active = TRUE, updated_at = NOW()
+		WHERE id = $1 AND org_id = $2`,
+		v.ID,
+		v.OrgID,
+	)
+	if err != nil {
+		return fmt.Errorf("calendar repo: activate version: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("calendar repo: activate version: version not found")
+	}
+	v.IsActive = true
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("calendar repo: commit: %w", err)
 	}
 	return nil
 }
