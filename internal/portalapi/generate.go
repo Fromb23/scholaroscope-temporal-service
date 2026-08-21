@@ -29,6 +29,23 @@ func (h *Handler) GenerateVersion(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusBadRequest, "invalid_version_uuid")
 		return
 	}
+	if !h.versionTermIsSchedulable(r.Context(), session.WorkspaceID, versionID, session.WorkspaceTimezone) {
+		writeError(w, http.StatusConflict, "term_not_schedulable")
+		return
+	}
+	jobID, err := h.startGenerationJob(r.Context(), session.WorkspaceID, versionID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	jobStatus := "FAILED"
+	jobError := "generation_failed"
+	defer func() {
+		_, _ = h.pool.Exec(context.Background(), `
+			UPDATE timetable_generation_job
+			SET status = $1, error_code = NULLIF($2, ''), finished_at = now()
+			WHERE id = $3 AND workspace_id = $4`, jobStatus, jobError, jobID, session.WorkspaceID)
+	}()
 	var body struct {
 		Seed            int64 `json:"seed"`
 		TimeBudgetMS    int   `json:"time_budget_ms"`
@@ -52,14 +69,18 @@ func (h *Handler) GenerateVersion(w http.ResponseWriter, r *http.Request, sessio
 
 	problem, slots, timetableID, err := h.loadEngineProblem(r.Context(), session.WorkspaceID, versionID, body.FullCoverage)
 	if err != nil {
+		jobError = "problem_load_failed"
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 	result := scheduling.Solve(problem, scheduling.EngineConfig{Seed: body.Seed, TimeBudget: time.Duration(body.TimeBudgetMS) * time.Millisecond, IterationBudget: body.IterationBudget, Restarts: body.Restarts, MaxConsecutive: 4})
 	if err := h.persistSolveResult(r.Context(), session.WorkspaceID, timetableID, versionID, slots, result); err != nil {
+		jobError = "result_persistence_failed"
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	jobStatus = "COMPLETED"
+	jobError = ""
 	status := http.StatusOK
 	if result.Status == scheduling.StatusInfeasible {
 		status = http.StatusUnprocessableEntity
@@ -67,18 +88,41 @@ func (h *Handler) GenerateVersion(w http.ResponseWriter, r *http.Request, sessio
 	writeJSON(w, status, result)
 }
 
+func (h *Handler) startGenerationJob(ctx context.Context, workspaceID, versionID uuid.UUID) (uuid.UUID, error) {
+	var versionExists bool
+	if err := h.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM timetable_version WHERE id = $1 AND workspace_id = $2)`, versionID, workspaceID).Scan(&versionExists); err != nil || !versionExists {
+		return uuid.Nil, errCode("version_not_found")
+	}
+	_, _ = h.pool.Exec(ctx, `
+		UPDATE timetable_generation_job
+		SET status = 'FAILED', error_code = 'generation_interrupted', finished_at = now()
+		WHERE workspace_id = $1 AND timetable_version_id = $2
+		  AND status = 'RUNNING' AND started_at < now() - interval '10 minutes'`, workspaceID, versionID)
+	jobID := uuid.New()
+	err := h.pool.QueryRow(ctx, `
+		INSERT INTO timetable_generation_job (id, workspace_id, timetable_version_id, status)
+		VALUES ($1, $2, $3, 'RUNNING')
+		ON CONFLICT (workspace_id, timetable_version_id) WHERE status = 'RUNNING' DO NOTHING
+		RETURNING id`, jobID, workspaceID, versionID).Scan(&jobID)
+	if err != nil {
+		return uuid.Nil, errCode("generation_already_running")
+	}
+	return jobID, err
+}
+
 func (h *Handler) loadEngineProblem(ctx context.Context, workspaceID, versionID uuid.UUID, fullCoverage bool) (scheduling.EngineProblem, map[string]generatedSlot, uuid.UUID, error) {
 	var timetableID, termID, calendarID uuid.UUID
 	var academicYearID *uuid.UUID
 	var versionStatus, timetableType string
+	var effectiveStart, effectiveEnd time.Time
 	err := h.pool.QueryRow(ctx, `
 		SELECT tv.timetable_id, tv.status, t.timetable_type, t.academic_term_uuid,
-		       t.calendar_id, term.academic_year_uuid
+		       t.calendar_id, term.academic_year_uuid, tv.effective_start, tv.effective_end
 		FROM timetable_version tv
 		JOIN timetable t ON t.id = tv.timetable_id AND t.workspace_id = tv.workspace_id
 		JOIN external_academic_term term ON term.id = t.academic_term_uuid AND term.workspace_id = tv.workspace_id
 		WHERE tv.id = $1 AND tv.workspace_id = $2`, versionID, workspaceID,
-	).Scan(&timetableID, &versionStatus, &timetableType, &termID, &calendarID, &academicYearID)
+	).Scan(&timetableID, &versionStatus, &timetableType, &termID, &calendarID, &academicYearID, &effectiveStart, &effectiveEnd)
 	if err != nil {
 		return scheduling.EngineProblem{}, nil, uuid.Nil, errCode("version_not_found")
 	}
@@ -117,6 +161,17 @@ func (h *Handler) loadEngineProblem(ctx context.Context, workspaceID, versionID 
 	}
 
 	problem := scheduling.EngineProblem{WorkspaceID: workspaceID.String(), AcademicYearID: academicYearID.String(), TermID: termID.String(), Periods: periods, Teachers: map[string]scheduling.EngineTeacher{}, Cohorts: map[string]scheduling.EngineCohort{}, Resources: map[string]scheduling.EngineResource{}, Registrations: map[string]map[string]bool{}, FullCoverage: fullCoverage}
+	exceptions, err := h.applicableCalendarExceptions(ctx, workspaceID, *academicYearID, termID, effectiveStart, effectiveEnd)
+	if err != nil {
+		return scheduling.EngineProblem{}, nil, uuid.Nil, err
+	}
+	for _, item := range exceptions {
+		problem.CalendarExceptions = append(problem.CalendarExceptions, scheduling.EngineCalendarException{
+			ID: item.ID.String(), WorkspaceID: workspaceID.String(), AcademicYearID: academicYearID.String(),
+			TermID: termID.String(), Kind: item.Kind, StartsOn: item.StartDate.Format("2006-01-02"),
+			EndsOn: item.EndDate.Format("2006-01-02"), BlocksLearning: item.AffectsLearning,
+		})
+	}
 	assignmentRows, err := h.pool.Query(ctx, `
 		SELECT assignment.id, assignment.teacher_uuid, assignment.cohort_uuid,
 		       assignment.cohort_subject_uuid, assignment.subject_uuid,
@@ -260,6 +315,19 @@ func (h *Handler) persistSolveResult(ctx context.Context, workspaceID, timetable
 		result.Validation.Unscheduled, result.Validation.HardConflictCount,
 		result.Validation.SoftViolationCount, string(feasibilityJSON), string(validationJSON))
 	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `
+		UPDATE timetable_version version
+		SET status = 'DRAFT',
+		    validation_summary = $1::jsonb,
+		    generator_version = 'hybrid-v1',
+		    academic_snapshot_hash = workspace.academic_snapshot_hash,
+		    updated_at = now()
+		FROM external_workspace workspace
+		WHERE version.id = $2
+		  AND version.workspace_id = $3
+		  AND workspace.id = version.workspace_id`, string(validationJSON), versionID, workspaceID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

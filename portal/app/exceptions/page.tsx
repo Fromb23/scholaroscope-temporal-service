@@ -1,48 +1,10 @@
 "use client";
-
 import { useEffect, useState } from "react";
 import { RequireSession } from "../../components/RequireSession";
-import { apiGet, type CalendarExceptionResponse } from "../../lib/api";
-
+import { apiGet, type AcademicContextResponse, type CalendarExceptionResponse } from "../../lib/api";
 export default function ExceptionsPage() {
-  const [data, setData] = useState<CalendarExceptionResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    apiGet<CalendarExceptionResponse>("/api/v1/exceptions")
-      .then(setData)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
-  }, []);
-
-  return (
-    <RequireSession>
-      {() => (
-        <section className="card">
-          <h2>Scholaroscope calendar exceptions</h2>
-          <p className="muted">These records are synchronized from Scholaroscope term calendars. Edit them in Scholaroscope, then replay synchronization.</p>
-          {error ? <div className="error">{error}</div> : null}
-          {!data?.exceptions.length ? (
-            <p className="muted">No calendar exceptions are synchronized for the active calendar.</p>
-          ) : (
-            <table>
-              <thead>
-                <tr><th>Date</th><th>Title</th><th>Type</th><th>Affects learning</th><th>Source</th></tr>
-              </thead>
-              <tbody>
-                {data.exceptions.map((item) => (
-                  <tr key={item.exception_uuid}>
-                    <td>{item.date}</td>
-                    <td>{item.title}</td>
-                    <td>{item.kind.replace(/_/g, " ")}</td>
-                    <td>{item.blocks_learning ? "Blocks normal lessons" : "Informational"}</td>
-                    <td>{item.source.replace(/_/g, " ")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </section>
-      )}
-    </RequireSession>
-  );
+  const [academic, setAcademic] = useState<AcademicContextResponse | null>(null); const [term, setTerm] = useState(""); const [data, setData] = useState<CalendarExceptionResponse | null>(null); const [error, setError] = useState<string | null>(null);
+  useEffect(() => { apiGet<AcademicContextResponse>("/api/v1/academic-context").then((response) => { setAcademic(response); const requested = new URLSearchParams(window.location.search).get("term_uuid"); const available = response.academic_years.flatMap((year) => year.terms); setTerm(available.some((item) => item.term_uuid === requested) ? requested ?? "" : response.selected_term?.term_uuid ?? ""); }).catch(() => setError("Academic context could not be loaded.")); }, []);
+  useEffect(() => { if (term) apiGet<CalendarExceptionResponse>(`/api/v1/exceptions?term_uuid=${term}`).then(setData).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Calendar could not be loaded.")); }, [term]);
+  return <RequireSession>{() => <section className="card"><div className="workspace-header"><div><h2>School calendar</h2><p className="muted">Closures, holidays, midterm breaks, and examinations synchronized from Scholaroscope.</p></div><label>Academic term<select value={term} onChange={(event) => { const termUuid = event.target.value; setTerm(termUuid); const url = new URL(window.location.href); url.searchParams.set("term_uuid", termUuid); window.history.replaceState({}, "", url); }}>{academic?.academic_years.flatMap((year) => year.terms.map((item) => <option key={item.term_uuid} value={item.term_uuid}>{year.name} · {item.name} · {item.lifecycle.toLowerCase()}</option>))}</select></label></div>{data?.academic_context ? <p><strong>{data.academic_context.academic_year_label} · {data.academic_context.name}</strong><br/><span className="muted">Showing events that intersect {data.effective_start} to {data.effective_end}.</span></p> : null}{error ? <div className="error">{error}</div> : null}{!data?.exceptions.length ? <div className="empty">This term has no calendar exceptions affecting its timetable dates.</div> : <div className="table-wrap"><table><thead><tr><th>Date range</th><th>Event</th><th>Meaning</th></tr></thead><tbody>{data.exceptions.map((item) => <tr key={item.exception_uuid}><td>{item.date}{item.end_date !== item.date ? ` to ${item.end_date}` : ""}</td><td><strong>{item.title}</strong><br/><span className="muted">{item.kind.replaceAll("_", " ").toLowerCase()}</span></td><td>{item.blocks_learning ? "Normal lessons are paused" : "Teaching can continue"}</td></tr>)}</tbody></table></div>}</section>}</RequireSession>;
 }

@@ -60,13 +60,19 @@ to rerun.
 
 ## Deployment and reconciliation order for existing workspaces
 
-1. Deploy the temporal service migrations first, including the academic-year and
-   actor-role projection migration.
+1. Back up the temporal database and deploy all temporal migrations first,
+   including `000008_grid_workflow_and_spaces`. It corrects the timetable
+   calendar foreign key, adds class/space semantics, generation-job locking, and
+   academic snapshot hashes. Existing drafts without a hash are safely marked
+   outdated by the API and must be regenerated; published versions are retained.
 2. Deploy the temporal API, outbox worker, and portal containers.
 3. Deploy the Scholaroscope backend changes that include academic-year payloads
    and coalesced `scholaroscope.timetable.workspace.academic_sync_requested.v1`
    events.
-4. Run Scholaroscope reconciliation for already-installed workspaces:
+4. Apply the Scholaroscope migration that registers the six-hour
+   `plugins.reconcile_timetable_academic_sync` periodic task. Existing
+   installations will then repair themselves through the signed outbox. To
+   accelerate the first post-deployment repair, optionally run:
 
    ```bash
    python manage.py reconcile_timetable_academic_sync
@@ -78,8 +84,10 @@ to rerun.
 5. Deploy the Scholaroscope frontend and temporal portal UI updates.
 
 Repeated reconciliation is safe. Snapshot upserts preserve existing workspace
-UUID mappings and disable stale actor-role/teaching-assignment projections that
-are no longer present in Scholaroscope.
+UUID mappings and deactivate stale academic years, terms, events, cohorts,
+subjects, registrations, actor roles, and teaching assignments that are no
+longer present in Scholaroscope. A manager can also request the same authorized,
+idempotent refresh from Scholaroscope when the portal reports pending data.
 
 ## Installation-scoped runtime trust
 

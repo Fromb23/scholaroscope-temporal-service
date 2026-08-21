@@ -24,6 +24,11 @@ implemented for development.
 
 Unknown major schema versions fail safely. Duplicate `event_id` or `idempotency_key` is idempotent. Out-of-order aggregate versions are rejected or marked for reconciliation.
 
+Full academic snapshots include `assignment_readiness.source_assignment_count`
+and `assignment_readiness.eligible_assignment_count`. This distinguishes an
+empty Scholaroscope assignment source from assignments excluded by active
+teacher, curriculum, or canonical cohort-subject eligibility rules.
+
 ## Signing
 
 Each installation has a separate secret. The sender signs timestamp and raw request body. The receiver validates signature and timestamp before JSON payload processing. Secrets and complete authorization tokens are never logged.
@@ -108,13 +113,19 @@ The portal uses session-derived workspace identity for these development
 management endpoints:
 
 - `GET /api/v1/workspace`
+- `GET /api/v1/academic-context[?term_uuid=...]`
+- `GET /api/v1/classes-spaces[?term_uuid=...]`
+- `GET /api/v1/workflow[?term_uuid=...&category=LEARNING]`
 - `GET /api/v1/calendar`
 - `PUT /api/v1/calendar`
-- `GET /api/v1/teachers`
+- `GET /api/v1/exceptions[?term_uuid=...&version_uuid=...]`
+- `GET /api/v1/teachers[?term_uuid=...]`
 - `GET /api/v1/availability`
-- `GET /api/v1/teaching-demands`
+- `GET /api/v1/teaching-demands[?term_uuid=...]`
 - `GET /api/v1/rooms`
 - `POST /api/v1/rooms`
+- `PATCH|DELETE /api/v1/rooms/{room_uuid}`
+- `PATCH /api/v1/classes/{cohort_uuid}/default-room`
 - `GET /api/v1/timetables`
 - `GET /api/v1/conflicts`
 - `POST /api/v1/timetable-versions/{version_uuid}/validate`
@@ -126,17 +137,18 @@ mutations.
 
 ## Portal routes
 
-The independent portal frontend exposes:
+The goal-oriented portal navigation exposes:
 
-- `/`
-- `/calendar`
-- `/availability`
-- `/rooms`
-- `/demand`
-- `/timetables`
-- `/timetables/new`
-- `/conflicts`
-- `/publication`
+- `/` and `/timetable` (weekly timetable workspace)
+- `/school-day`
+- `/classes-teachers`
+- `/exceptions`
+- `/classes-spaces`
+
+Technical concerns such as demand, conflicts, validation, generation, and
+publication are presented contextually in the timetable workspace rather than
+as primary navigation destinations. Legacy deep links may remain as guarded
+compatibility surfaces during development.
 
 Direct unauthenticated access renders the session-expired state and instructs the
 manager to relaunch from Scholaroscope. There is no standalone username/password

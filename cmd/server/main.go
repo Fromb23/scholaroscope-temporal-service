@@ -107,6 +107,9 @@ func main() {
 
 	// Workspace-implicit portal API routes.
 	mux.HandleFunc("GET /api/v1/workspace", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Workspace))
+	mux.HandleFunc("GET /api/v1/academic-context", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.AcademicContext))
+	mux.HandleFunc("GET /api/v1/classes-spaces", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.ClassesSpaces))
+	mux.HandleFunc("GET /api/v1/workflow", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Workflow))
 	mux.HandleFunc("GET /api/v1/calendar", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.GetCalendar))
 	mux.HandleFunc("PUT /api/v1/calendar", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.PutCalendar))
 	mux.HandleFunc("POST /api/v1/versions/{versionId}/generate", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.GenerateVersion))
@@ -116,6 +119,9 @@ func main() {
 	mux.HandleFunc("GET /api/v1/teaching-demands", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.TeachingDemands))
 	mux.HandleFunc("GET /api/v1/rooms", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Rooms))
 	mux.HandleFunc("POST /api/v1/rooms", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Rooms))
+	mux.HandleFunc("PATCH /api/v1/rooms/{roomId}", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.RoomDetail))
+	mux.HandleFunc("DELETE /api/v1/rooms/{roomId}", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.RoomDetail))
+	mux.HandleFunc("PATCH /api/v1/classes/{cohortId}/default-room", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.ClassDefaultRoom))
 	mux.HandleFunc("GET /api/v1/timetables", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Timetables))
 	mux.HandleFunc("POST /api/v1/timetables", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Timetables))
 	mux.HandleFunc("GET /api/v1/timetables/{timetableId}", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.TimetableDetail))
