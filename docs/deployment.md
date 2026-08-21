@@ -58,6 +58,29 @@ The compose `migrations` service records applied `*.up.sql` files in
 existing production volumes because some historical DDL statements are not safe
 to rerun.
 
+## Deployment and reconciliation order for existing workspaces
+
+1. Deploy the temporal service migrations first, including the academic-year and
+   actor-role projection migration.
+2. Deploy the temporal API, outbox worker, and portal containers.
+3. Deploy the Scholaroscope backend changes that include academic-year payloads
+   and coalesced `scholaroscope.timetable.workspace.academic_sync_requested.v1`
+   events.
+4. Run Scholaroscope reconciliation for already-installed workspaces:
+
+   ```bash
+   python manage.py reconcile_timetable_academic_sync
+   ```
+
+   Use `--organization-id <id>` to limit a repair to one workspace. The command
+   queues normal signed outbox events; it does not require database edits,
+   volume deletion, plugin uninstall, or plugin reinstall.
+5. Deploy the Scholaroscope frontend and temporal portal UI updates.
+
+Repeated reconciliation is safe. Snapshot upserts preserve existing workspace
+UUID mappings and disable stale actor-role/teaching-assignment projections that
+are no longer present in Scholaroscope.
+
 ## Installation-scoped runtime trust
 
 Bootstrap events register each installation’s runtime signing key and key id.

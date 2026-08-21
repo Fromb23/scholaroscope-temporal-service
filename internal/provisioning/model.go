@@ -16,12 +16,26 @@ type BootstrapPayload struct {
 
 type AcademicSyncPayload struct {
 	Actors              []ActorProjection              `json:"actors"`
+	AcademicYears       []AcademicYearProjection       `json:"academic_years"`
 	Terms               []TermProjection               `json:"terms"`
 	CalendarEvents      []CalendarEventProjection      `json:"calendar_events"`
 	Cohorts             []CohortProjection             `json:"cohorts"`
 	Subjects            []SubjectProjection            `json:"subjects"`
 	CohortSubjects      []CohortSubjectProjection      `json:"cohort_subjects"`
 	TeachingAssignments []TeachingAssignmentProjection `json:"teaching_assignments"`
+}
+
+type AcademicYearProjection struct {
+	AcademicYearRef  string `json:"academic_year_ref"`
+	AcademicYearUUID string `json:"academic_year_uuid"`
+	WorkspaceRef     string `json:"workspace_ref"`
+	Name             string `json:"name"`
+	StartDate        string `json:"start_date"`
+	EndDate          string `json:"end_date"`
+	IsCurrent        bool   `json:"is_current"`
+	Status           string `json:"status"`
+	CurriculumRef    string `json:"curriculum_ref"`
+	CurriculumName   string `json:"curriculum_name"`
 }
 
 type ActorProjection struct {
@@ -36,6 +50,8 @@ type ActorProjection struct {
 type TermProjection struct {
 	TermRef           string `json:"term_ref"`
 	TermUUID          string `json:"term_uuid"`
+	AcademicYearRef   string `json:"academic_year_ref"`
+	AcademicYearUUID  string `json:"academic_year_uuid"`
 	Name              string `json:"name"`
 	AcademicYearLabel string `json:"academic_year_label"`
 	StartDate         string `json:"start_date"`
@@ -48,6 +64,8 @@ type TermProjection struct {
 type CalendarEventProjection struct {
 	EventRef        string `json:"event_ref"`
 	EventUUID       string `json:"event_uuid"`
+	AcademicYearRef  string `json:"academic_year_ref"`
+	AcademicYearUUID string `json:"academic_year_uuid"`
 	TermRef         string `json:"term_ref"`
 	TermUUID        string `json:"term_uuid"`
 	Title           string `json:"title"`
@@ -65,6 +83,7 @@ type CohortProjection struct {
 	Level           string `json:"level"`
 	Stream          string `json:"stream"`
 	AcademicYearRef string `json:"academic_year_ref"`
+	AcademicYearUUID string `json:"academic_year_uuid"`
 }
 
 type SubjectProjection struct {

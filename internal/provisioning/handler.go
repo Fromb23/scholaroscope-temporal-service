@@ -83,7 +83,8 @@ func (h *Handler) HandleScholaroscopeEvent(w http.ResponseWriter, r *http.Reques
 	}
 
 	switch envelope.EventType {
-	case "scholaroscope.timetable.workspace.bootstrap_requested.v1":
+	case "scholaroscope.timetable.workspace.bootstrap_requested.v1",
+		"scholaroscope.timetable.workspace.academic_sync_requested.v1":
 		h.handleBootstrap(w, r, envelope)
 	case "scholaroscope.timetable.workspace.disabled.v1":
 		if err := h.repo.DisableWorkspace(r.Context(), envelope.PluginInstallationRef); err != nil {
