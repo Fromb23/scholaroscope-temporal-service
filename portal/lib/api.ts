@@ -70,6 +70,8 @@ export type CalendarVersion = {
   day_end_time?: string;
   slot_duration_minutes?: number;
   status?: string;
+  is_active?: boolean;
+  break_structure?: Array<{ label: string; start_time: string; end_time: string; kind?: string }>;
 };
 
 export type CalendarResponse = {
@@ -135,6 +137,8 @@ export type TeachingDemand = {
   cohort_name: string;
   subject_uuid: string;
   subject_name: string;
+  required_periods_per_cycle: number;
+  required_double_lessons: number;
 };
 
 export type TeachingDemandResponse = {
@@ -161,13 +165,24 @@ export type CalendarExceptionResponse = {
 
 const apiBase = process.env.NEXT_PUBLIC_TEMPORAL_API_BASE_URL ?? "http://localhost:8081";
 
+async function responseError(response: Response): Promise<Error> {
+  let message = `${response.status} ${response.statusText}`;
+  try {
+    const payload = await response.json() as { error?: { message?: string; code?: string; field_errors?: Record<string, string[]> } };
+    message = payload.error?.message ?? payload.error?.code ?? message;
+  } catch {
+    // A non-JSON gateway response is an unexpected failure; retain HTTP context.
+  }
+  return new Error(message);
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     credentials: "include",
     cache: "no-store",
   });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    throw await responseError(response);
   }
   return response.json() as Promise<T>;
 }
@@ -180,7 +195,7 @@ export async function apiSend<T>(path: string, method: string, body?: unknown): 
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    throw await responseError(response);
   }
   return response.json() as Promise<T>;
 }

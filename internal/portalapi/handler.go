@@ -3,6 +3,7 @@ package portalapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -41,7 +42,7 @@ func (h *Handler) ValidateVersion(w http.ResponseWriter, r *http.Request, sessio
 		status = "BLOCKED"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": status,
+		"status":         status,
 		"hard_conflicts": summary.HardConflicts,
 		"soft_conflicts": summary.SoftConflicts,
 	})
@@ -103,6 +104,19 @@ func (h *Handler) conflictSummaryForVersion(ctx context.Context, workspaceID, ve
 }
 
 func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSession, versionID uuid.UUID, reason string) (map[string]any, error) {
+	var solveStatus string
+	var unscheduled, solverHardConflicts int
+	if err := h.pool.QueryRow(ctx, `
+		SELECT status, unscheduled_mandatory_lessons, hard_conflicts
+		FROM solver_run
+		WHERE workspace_id = $1 AND timetable_version_id = $2
+		ORDER BY created_at DESC LIMIT 1`, session.WorkspaceID, versionID,
+	).Scan(&solveStatus, &unscheduled, &solverHardConflicts); err != nil {
+		return nil, errCode("complete_solver_validation_required")
+	}
+	if (solveStatus != "COMPLETE" && solveStatus != "COMPLETE_WITH_SOFT_VIOLATIONS") || unscheduled != 0 || solverHardConflicts != 0 {
+		return nil, errCode("incomplete_or_conflicting_schedule")
+	}
 	if err := h.rebuildConflictsForVersion(ctx, session.WorkspaceID, versionID); err != nil {
 		return nil, err
 	}
@@ -123,6 +137,7 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 	var versionNumber int
 	var effectiveStart, effectiveEnd time.Time
 	var previousVersionID *uuid.UUID
+	var termName, academicYearLabel, scholaroscopeTermRef string
 	err = tx.QueryRow(ctx, `
 		SELECT tv.timetable_id, tv.version_number, tv.effective_start, tv.effective_end,
 		       (
@@ -134,14 +149,18 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 		             AND prev.id <> tv.id
 		           ORDER BY prev.published_at DESC NULLS LAST, prev.version_number DESC
 		           LIMIT 1
-		       ) AS previous_version_id
+		       ) AS previous_version_id,
+		       COALESCE(term.name, ''), COALESCE(term.academic_year_label, ''),
+		       COALESCE(term.scholaroscope_term_ref, '')
 		FROM timetable_version tv
+		JOIN timetable t ON t.id = tv.timetable_id AND t.workspace_id = tv.workspace_id
+		LEFT JOIN external_academic_term term ON term.id = t.academic_term_uuid AND term.workspace_id = tv.workspace_id
 		WHERE tv.id = $1
 		  AND tv.workspace_id = $2
 		  AND tv.status IN ('DRAFT', 'VALIDATED', 'PUBLISHED')`,
 		versionID,
 		session.WorkspaceID,
-	).Scan(&timetableID, &versionNumber, &effectiveStart, &effectiveEnd, &previousVersionID)
+	).Scan(&timetableID, &versionNumber, &effectiveStart, &effectiveEnd, &previousVersionID, &termName, &academicYearLabel, &scholaroscopeTermRef)
 	if err != nil {
 		return nil, errCode("version_not_publishable")
 	}
@@ -154,9 +173,9 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 	if previousVersionID == nil {
 		for _, entry := range entries {
 			diff = append(diff, map[string]any{
-				"change_type": "ENTRY_ADDED",
+				"change_type":       "ENTRY_ADDED",
 				"stable_entry_uuid": entry["stable_entry_uuid"],
-				"after": entry,
+				"after":             entry,
 			})
 		}
 	} else {
@@ -213,7 +232,10 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 		          'version_label', $9::text,
 		          'effective_from', $10::text,
 		          'effective_until', $11::text,
-		          'publication_reason', $12::text,
+			          'publication_reason', $12::text,
+			          'term_label', $16::text,
+			          'academic_year_label', $17::text,
+			          'scholaroscope_term_id', NULLIF($18::text, ''),
 		          'published_at', now(),
 		          'entries', $13::jsonb,
 		          'diff', $14::jsonb
@@ -233,6 +255,9 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 		mustJSON(entries),
 		mustJSON(diff),
 		eventType,
+		termName,
+		academicYearLabel,
+		scholaroscopeTermRef,
 	)
 	if err != nil {
 		return nil, err
@@ -241,8 +266,8 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 		return nil, err
 	}
 	return map[string]any{
-		"status": "PUBLISHED",
-		"version_uuid": versionID,
+		"status":          "PUBLISHED",
+		"version_uuid":    versionID,
 		"outbox_event_id": outboxID,
 	}, nil
 }
@@ -311,30 +336,44 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 			return nil, err
 		}
 		entries = append(entries, map[string]any{
-			"entry_uuid": entryID.String(),
-			"stable_entry_uuid": stableID.String(),
-			"teacher_uuid": uuidString(teacherID),
-			"teacher_name": teacherName,
-			"teacher_ref": teacherRef,
-			"cohort_uuid": uuidString(cohortID),
-			"cohort_name": cohortName,
-			"cohort_ref": cohortRef,
-			"subject_uuid": uuidString(subjectID),
-			"subject_name": subjectName,
-			"subject_code": subjectCode,
-			"subject_ref": subjectRef,
+			"entry_uuid":          entryID.String(),
+			"stable_entry_uuid":   stableID.String(),
+			"logical_entry_uuid":  stableID.String(),
+			"teacher_uuid":        uuidString(teacherID),
+			"teacher_name":        teacherName,
+			"teacher_ref":         teacherRef,
+			"teacher_id":          teacherRef,
+			"cohort_uuid":         uuidString(cohortID),
+			"cohort_name":         cohortName,
+			"cohort_ref":          cohortRef,
+			"cohort_id":           cohortRef,
+			"subject_uuid":        uuidString(subjectID),
+			"subject_name":        subjectName,
+			"subject_code":        subjectCode,
+			"subject_ref":         subjectRef,
+			"subject_id":          subjectRef,
 			"cohort_subject_uuid": uuidString(cohortSubjectID),
-			"cohort_subject_ref": cohortSubjectRef,
-			"room_uuid": uuidString(roomID),
-			"room_name": roomName,
-			"day_of_week": dayName(day),
-			"start_time": startTime,
-			"end_time": endTime,
-			"duration_periods": duration,
-			"start_period_index": startPeriod,
+			"cohort_subject_ref":  cohortSubjectRef,
+			"room_uuid":           uuidString(roomID),
+			"room_name":           roomName,
+			"day_of_week":         dayName(day),
+			"start_time":          startTime,
+			"end_time":            endTime,
+			"duration_minutes":    durationMinutes(startTime, endTime),
+			"duration_periods":    duration,
+			"start_period_index":  startPeriod,
 		})
 	}
 	return entries, rows.Err()
+}
+
+func durationMinutes(start, end string) int {
+	startAt, startErr := time.Parse("15:04", start)
+	endAt, endErr := time.Parse("15:04", end)
+	if startErr != nil || endErr != nil || !endAt.After(startAt) {
+		return 0
+	}
+	return int(endAt.Sub(startAt).Minutes())
 }
 
 func uuidString(value *uuid.UUID) string {
@@ -345,7 +384,7 @@ func uuidString(value *uuid.UUID) string {
 }
 
 func dayName(day int) string {
-	names := []string{"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"}
+	names := []string{"MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"}
 	if day < 0 || day >= len(names) {
 		return "UNKNOWN"
 	}
@@ -466,14 +505,14 @@ func NewHandler(pool *pgxpool.Pool, calendarService *calendar.Service) *Handler 
 
 func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
 	var workspace struct {
-		ID                    uuid.UUID  `json:"workspace_uuid"`
-		DisplayName           string     `json:"display_name"`
-		Timezone              string     `json:"timezone"`
-		Status                string     `json:"status"`
-		ProvisioningState     string     `json:"provisioning_state"`
-		IntegrationHealth     string     `json:"integration_health"`
-		LastSuccessfulSyncAt  *time.Time `json:"last_successful_sync_at"`
-		ReconciliationRequired bool      `json:"reconciliation_required"`
+		ID                     uuid.UUID  `json:"workspace_uuid"`
+		DisplayName            string     `json:"display_name"`
+		Timezone               string     `json:"timezone"`
+		Status                 string     `json:"status"`
+		ProvisioningState      string     `json:"provisioning_state"`
+		IntegrationHealth      string     `json:"integration_health"`
+		LastSuccessfulSyncAt   *time.Time `json:"last_successful_sync_at"`
+		ReconciliationRequired bool       `json:"reconciliation_required"`
 	}
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, display_name, timezone, status, provisioning_state,
@@ -513,12 +552,12 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 	if err := yearRow.Scan(&yearID, &yearRef, &yearName, &yearStart, &yearEnd, &yearIsCurrent, &yearStatus); err == nil {
 		currentAcademicYear = map[string]any{
 			"academic_year_uuid": yearID.String(),
-			"academic_year_ref": yearRef,
-			"name": yearName,
-			"start_date": yearStart,
-			"end_date": yearEnd,
-			"is_current": yearIsCurrent,
-			"status": yearStatus,
+			"academic_year_ref":  yearRef,
+			"name":               yearName,
+			"start_date":         yearStart,
+			"end_date":           yearEnd,
+			"is_current":         yearIsCurrent,
+			"status":             yearStatus,
 		}
 	}
 	academicYearParam := ""
@@ -546,14 +585,14 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 	var termCalendarReady, termFrozen bool
 	if err := termRow.Scan(&termID, &termName, &academicYearLabel, &termStart, &termEnd, &termStatus, &termCalendarReady, &termFrozen); err == nil {
 		currentTerm = map[string]any{
-			"term_uuid": termID.String(),
-			"name": termName,
+			"term_uuid":           termID.String(),
+			"name":                termName,
 			"academic_year_label": academicYearLabel,
-			"start_date": termStart,
-			"end_date": termEnd,
-			"status": termStatus,
-			"calendar_ready": termCalendarReady,
-			"is_current": true,
+			"start_date":          termStart,
+			"end_date":            termEnd,
+			"status":              termStatus,
+			"calendar_ready":      termCalendarReady,
+			"is_current":          true,
 		}
 	}
 	var schedulableTerm map[string]any
@@ -576,25 +615,25 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 	var schedCalendarReady, schedFrozen bool
 	if err := schedulableRow.Scan(&schedID, &schedName, &schedYearLabel, &schedStart, &schedEnd, &schedStatus, &schedCalendarReady, &schedFrozen); err == nil {
 		schedulableTerm = map[string]any{
-			"term_uuid": schedID.String(),
-			"name": schedName,
+			"term_uuid":           schedID.String(),
+			"name":                schedName,
 			"academic_year_label": schedYearLabel,
-			"start_date": schedStart,
-			"end_date": schedEnd,
-			"status": schedStatus,
-			"calendar_ready": schedCalendarReady,
-			"is_current": currentTerm != nil && currentTerm["term_uuid"] == schedID.String(),
-			"is_upcoming": schedStart > today,
+			"start_date":          schedStart,
+			"end_date":            schedEnd,
+			"status":              schedStatus,
+			"calendar_ready":      schedCalendarReady,
+			"is_current":          currentTerm != nil && currentTerm["term_uuid"] == schedID.String(),
+			"is_upcoming":         schedStart > today,
 		}
 	}
 	counts := map[string]int{}
 	for key, query := range map[string]string{
-		"teacher_count": "SELECT COUNT(DISTINCT teacher_uuid) FROM external_teaching_assignment WHERE workspace_id = $1 AND status = 'ACTIVE'",
-		"class_count": "SELECT COUNT(*) FROM external_cohort WHERE workspace_id = $1 AND status = 'ACTIVE'",
-		"subject_count": "SELECT COUNT(*) FROM external_subject WHERE workspace_id = $1 AND status IN ('ACTIVE', 'OFFERED', 'REACTIVATED')",
-		"cohort_subject_count": "SELECT COUNT(*) FROM external_cohort_subject WHERE workspace_id = $1 AND status = 'ACTIVE'",
+		"teacher_count":             "SELECT COUNT(DISTINCT teacher_uuid) FROM external_teaching_assignment WHERE workspace_id = $1 AND status = 'ACTIVE'",
+		"class_count":               "SELECT COUNT(*) FROM external_cohort WHERE workspace_id = $1 AND status = 'ACTIVE'",
+		"subject_count":             "SELECT COUNT(*) FROM external_subject WHERE workspace_id = $1 AND status IN ('ACTIVE', 'OFFERED', 'REACTIVATED')",
+		"cohort_subject_count":      "SELECT COUNT(*) FROM external_cohort_subject WHERE workspace_id = $1 AND status = 'ACTIVE'",
 		"teaching_assignment_count": "SELECT COUNT(*) FROM external_teaching_assignment WHERE workspace_id = $1 AND status = 'ACTIVE'",
-		"timetable_count": "SELECT COUNT(*) FROM timetable WHERE workspace_id = $1",
+		"timetable_count":           "SELECT COUNT(*) FROM timetable WHERE workspace_id = $1",
 		"published_timetable_count": "SELECT COUNT(*) FROM timetable_version WHERE workspace_id = $1 AND status = 'PUBLISHED'",
 	} {
 		var count int
@@ -624,23 +663,23 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"workspace_uuid": workspace.ID,
-		"display_name": workspace.DisplayName,
-		"timezone": workspace.Timezone,
-		"status": workspace.Status,
-		"provisioning_state": workspace.ProvisioningState,
-		"integration_health": workspace.IntegrationHealth,
+		"workspace_uuid":          workspace.ID,
+		"display_name":            workspace.DisplayName,
+		"timezone":                workspace.Timezone,
+		"status":                  workspace.Status,
+		"provisioning_state":      workspace.ProvisioningState,
+		"integration_health":      workspace.IntegrationHealth,
 		"last_successful_sync_at": workspace.LastSuccessfulSyncAt,
 		"reconciliation_required": workspace.ReconciliationRequired,
 		"actor": map[string]any{
-			"actor_uuid": session.ActorID.String(),
+			"actor_uuid":   session.ActorID.String(),
 			"display_name": session.ActorDisplayName,
-			"actor_kind": session.ActorKind,
+			"actor_kind":   session.ActorKind,
 		},
 		"current_academic_year": currentAcademicYear,
-		"current_term": currentTerm,
-		"schedulable_term": schedulableTerm,
-		"counts": counts,
+		"current_term":          currentTerm,
+		"schedulable_term":      schedulableTerm,
+		"counts":                counts,
 		"readiness": map[string]any{
 			"status": readinessStatus,
 			"checks": readinessChecks,
@@ -661,16 +700,16 @@ func (h *Handler) GetCalendar(w http.ResponseWriter, r *http.Request, session *l
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"calendar_version": nil,
-			"slots": []any{},
-			"status": "NO_ACTIVE_CALENDAR",
+			"slots":            []any{},
+			"status":           "NO_ACTIVE_CALENDAR",
 		})
 		return
 	}
 	slots, _ := h.calendarService.GetSlotsForVersion(r.Context(), version.ID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"calendar_version": version,
-		"slots": slots,
-		"status": "ACTIVE",
+		"slots":            slots,
+		"status":           "ACTIVE",
 	})
 }
 
@@ -704,13 +743,21 @@ func (h *Handler) PutCalendar(w http.ResponseWriter, r *http.Request, session *l
 		BreakStructure:      body.BreakStructure,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "calendar_validation_failed")
+		var validation *calendar.ValidationError
+		if errors.As(err, &validation) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{
+				"code": validation.Code, "message": validation.Message,
+				"field_errors": map[string][]string{validation.Field: {validation.Message}},
+			}})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "calendar_persistence_failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"calendar_version": version,
-		"slots": slots,
-		"status": "ACTIVE",
+		"slots":            slots,
+		"status":           "ACTIVE",
 	})
 }
 
@@ -740,19 +787,19 @@ func (h *Handler) CalendarExceptions(w http.ResponseWriter, r *http.Request, ses
 			return
 		}
 		exceptions = append(exceptions, map[string]any{
-			"exception_uuid": id.String(),
-			"date": startsOn,
-			"end_date": endsOn,
-			"kind": kind,
-			"title": label,
-			"blocks_learning": affectsLearning,
+			"exception_uuid":     id.String(),
+			"date":               startsOn,
+			"end_date":           endsOn,
+			"kind":               kind,
+			"title":              label,
+			"blocks_learning":    affectsLearning,
 			"academic_term_uuid": uuidString(termID),
-			"source": source,
+			"source":             source,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"exceptions": exceptions,
-		"count": len(exceptions),
+		"count":      len(exceptions),
 	})
 }
 
@@ -795,13 +842,13 @@ func (h *Handler) Teachers(w http.ResponseWriter, r *http.Request, session *laun
 		var assignmentItems []map[string]any
 		_ = json.Unmarshal(assignments, &assignmentItems)
 		actors = append(actors, map[string]any{
-			"actor_uuid": id,
+			"actor_uuid":             id,
 			"scholaroscope_user_ref": ref,
-			"display_name": name,
-			"actor_kind": "TEACHER",
-			"actor_kinds": []string{"TEACHER"},
-			"status": status,
-			"assignments": assignmentItems,
+			"display_name":           name,
+			"actor_kind":             "TEACHER",
+			"actor_kinds":            []string{"TEACHER"},
+			"status":                 status,
+			"assignments":            assignmentItems,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"teachers": actors, "count": len(actors)})
@@ -836,12 +883,12 @@ func (h *Handler) Rooms(w http.ResponseWriter, r *http.Request, session *launch.
 			return
 		}
 		rooms = append(rooms, map[string]any{
-			"room_uuid": id,
+			"room_uuid":    id,
 			"external_ref": externalRef,
-			"name": name,
-			"capacity": capacity,
-			"exclusive": exclusive,
-			"status": status,
+			"name":         name,
+			"capacity":     capacity,
+			"exclusive":    exclusive,
+			"status":       status,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rooms": rooms, "count": len(rooms)})
@@ -850,7 +897,7 @@ func (h *Handler) Rooms(w http.ResponseWriter, r *http.Request, session *launch.
 func (h *Handler) createRoom(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
 	var body struct {
 		Name     string `json:"name"`
-		Capacity *int  `json:"capacity"`
+		Capacity *int   `json:"capacity"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_room")
@@ -907,15 +954,15 @@ func (h *Handler) Timetables(w http.ResponseWriter, r *http.Request, session *la
 			return
 		}
 		items = append(items, map[string]any{
-			"timetable_uuid": timetableID,
-			"name": name,
-			"type": timetableType,
-			"version_uuid": versionID,
-			"version_number": versionNumber,
-			"status": versionStatus,
+			"timetable_uuid":  timetableID,
+			"name":            name,
+			"type":            timetableType,
+			"version_uuid":    versionID,
+			"version_number":  versionNumber,
+			"status":          versionStatus,
 			"effective_start": effectiveStart,
-			"effective_end": effectiveEnd,
-			"published_at": publishedAt,
+			"effective_end":   effectiveEnd,
+			"published_at":    publishedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"timetables": items, "count": len(items)})
@@ -941,6 +988,10 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 	}
 	if timetableType != "LEARNING" && timetableType != "EXAMINATION" {
 		writeError(w, http.StatusBadRequest, "invalid_timetable_type")
+		return
+	}
+	if timetableType == "EXAMINATION" {
+		writeError(w, http.StatusConflict, "examination_scheduling_feature_gated")
 		return
 	}
 	start, err := time.Parse("2006-01-02", body.EffectiveStart)
@@ -1062,8 +1113,8 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"timetable_uuid": timetableID,
-		"version_uuid": versionID,
-		"status": "DRAFT",
+		"version_uuid":   versionID,
+		"status":         "DRAFT",
 	})
 }
 
@@ -1151,13 +1202,13 @@ func (h *Handler) VersionDetail(w http.ResponseWriter, r *http.Request, session 
 	}
 	_ = tx.Commit(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version_uuid": versionID,
-		"timetable_uuid": timetableID,
-		"version_number": versionNumber,
-		"status": versionStatus,
+		"version_uuid":    versionID,
+		"timetable_uuid":  timetableID,
+		"version_number":  versionNumber,
+		"status":          versionStatus,
 		"effective_start": start,
-		"effective_end": end,
-		"entries": entries,
+		"effective_end":   end,
+		"entries":         entries,
 	})
 }
 
@@ -1408,7 +1459,9 @@ func (h *Handler) TeachingDemands(w http.ResponseWriter, r *http.Request, sessio
 		SELECT eta.id, eta.teacher_uuid, COALESCE(a.display_name, ''),
 		       eta.cohort_subject_uuid, eta.cohort_uuid, eta.subject_uuid,
 		       eta.cohort_name, eta.subject_name, eta.teacher_ref,
-		       eta.cohort_subject_ref, eta.cohort_ref, eta.subject_ref, eta.status
+		       eta.cohort_subject_ref, eta.cohort_ref, eta.subject_ref, eta.status,
+		       COALESCE((eta.scheduling_requirements->>'weekly_lesson_requirement')::integer, 1),
+		       COALESCE((eta.scheduling_requirements->>'required_double_lessons')::integer, 0)
 		FROM external_teaching_assignment eta
 		JOIN external_actor a ON a.workspace_id = eta.workspace_id AND a.id = eta.teacher_uuid
 		WHERE eta.workspace_id = $1
@@ -1425,42 +1478,45 @@ func (h *Handler) TeachingDemands(w http.ResponseWriter, r *http.Request, sessio
 	for rows.Next() {
 		var id, teacherID, cohortSubjectID, cohortID, subjectID uuid.UUID
 		var teacherName, cohortName, subjectName, teacherRef, cohortSubjectRef, cohortRef, subjectRef, status string
+		var requiredPeriods, requiredDoubles int
 		if err := rows.Scan(
 			&id, &teacherID, &teacherName, &cohortSubjectID, &cohortID, &subjectID,
 			&cohortName, &subjectName, &teacherRef, &cohortSubjectRef, &cohortRef, &subjectRef, &status,
+			&requiredPeriods, &requiredDoubles,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "teaching_demands_scan_failed")
 			return
 		}
 		demands = append(demands, map[string]any{
-			"teaching_assignment_uuid": id,
-			"teacher_uuid": teacherID,
-			"teacher_name": teacherName,
-			"teacher_ref": teacherRef,
-			"cohort_subject_uuid": cohortSubjectID,
-			"cohort_subject_ref": cohortSubjectRef,
-			"cohort_uuid": cohortID,
-			"cohort_ref": cohortRef,
-			"cohort_name": cohortName,
-			"subject_uuid": subjectID,
-			"subject_ref": subjectRef,
-			"subject_name": subjectName,
-			"status": status,
-			"required_periods_per_cycle": 1,
+			"teaching_assignment_uuid":   id,
+			"teacher_uuid":               teacherID,
+			"teacher_name":               teacherName,
+			"teacher_ref":                teacherRef,
+			"cohort_subject_uuid":        cohortSubjectID,
+			"cohort_subject_ref":         cohortSubjectRef,
+			"cohort_uuid":                cohortID,
+			"cohort_ref":                 cohortRef,
+			"cohort_name":                cohortName,
+			"subject_uuid":               subjectID,
+			"subject_ref":                subjectRef,
+			"subject_name":               subjectName,
+			"status":                     status,
+			"required_periods_per_cycle": requiredPeriods,
+			"required_double_lessons":    requiredDoubles,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"demands": demands,
-		"count": len(demands),
-		"status": "SYNCHRONIZED",
+		"count":   len(demands),
+		"status":  "SYNCHRONIZED",
 	})
 }
 
 func (h *Handler) Availability(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"availability": []any{},
-		"count": 0,
-		"status": "USE_TEACHER_DETAIL_ENDPOINT_FOR_EDITS",
+		"count":        0,
+		"status":       "USE_TEACHER_DETAIL_ENDPOINT_FOR_EDITS",
 	})
 }
 
@@ -1488,8 +1544,8 @@ func (h *Handler) Conflicts(w http.ResponseWriter, r *http.Request, session *lau
 		}
 		items = append(items, map[string]any{
 			"conflict_type": conflictType,
-			"severity": severity,
-			"count": count,
+			"severity":      severity,
+			"count":         count,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"summary": items})

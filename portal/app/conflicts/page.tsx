@@ -2,57 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { RequireSession } from "../../components/RequireSession";
-import { apiGet, apiSend } from "../../lib/api";
+import { apiGet } from "../../lib/api";
+
+type ConflictSummary = { summary: Array<{ conflict_type: string; severity: string; count: number }> };
 
 export default function ConflictsPage() {
-  const [calendarVersionId, setCalendarVersionId] = useState("");
-  const [conflictId, setConflictId] = useState("");
-  const [result, setResult] = useState<unknown>(null);
+  const [result, setResult] = useState<ConflictSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    apiGet("/api/v1/conflicts")
-      .then(setResult)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
-  }, []);
-
-  return (
-    <RequireSession>
-      {(session) => (
-        <>
-          <h2>Conflict inspection and resolution</h2>
-          <p className="muted">Summary is loaded from workspace-implicit portal APIs. Legacy calendar-specific inspection remains protected below.</p>
-          <div className="toolbar">
-            <input value={calendarVersionId} onChange={(event) => setCalendarVersionId(event.target.value)} placeholder="Calendar version UUID" />
-            <button
-              type="button"
-              onClick={() => {
-                setError(null);
-                apiGet(`/orgs/${session.workspace_uuid}/calendar/${calendarVersionId}/conflicts`)
-                  .then(setResult)
-                  .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
-              }}
-            >
-              Load conflicts
-            </button>
-          </div>
-          <div className="toolbar">
-            <input value={conflictId} onChange={(event) => setConflictId(event.target.value)} placeholder="Conflict UUID" />
-            <button
-              type="button"
-              onClick={() => {
-                setError(null);
-                apiSend(`/orgs/${session.workspace_uuid}/conflicts/${conflictId}/resolve`, "POST")
-                  .then(setResult)
-                  .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed"));
-              }}
-            >
-              Resolve selected conflict
-            </button>
-          </div>
-          {error ? <div className="error">{error}</div> : null}
-          <pre className="card">{JSON.stringify(result, null, 2)}</pre>
-        </>
-      )}
-    </RequireSession>
-  );
+  useEffect(() => { apiGet<ConflictSummary>("/api/v1/conflicts").then(setResult).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Conflicts could not be loaded.")); }, []);
+  return <RequireSession>{() => <section className="card">
+    <h2>Conflict inspection</h2>
+    <p className="muted">Unresolved hard and soft conflicts for the active workspace. Run validation after changing a draft.</p>
+    {error ? <div className="error">{error}</div> : null}
+    {!result?.summary.length ? <p>No unresolved conflicts.</p> : <table><thead><tr><th>Constraint</th><th>Severity</th><th>Affected entries</th></tr></thead><tbody>{result.summary.map((item) => <tr key={`${item.conflict_type}-${item.severity}`}><td>{item.conflict_type.replaceAll("_", " ")}</td><td>{item.severity}</td><td>{item.count}</td></tr>)}</tbody></table>}
+  </section>}</RequireSession>;
 }

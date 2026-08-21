@@ -29,6 +29,7 @@ export default function DemandPage() {
                   <th>Class</th>
                   <th>Subject</th>
                   <th>Periods/cycle</th>
+                  <th>Double lessons</th>
                 </tr>
               </thead>
               <tbody>
@@ -37,7 +38,8 @@ export default function DemandPage() {
                     <td>{demand.teacher_name}</td>
                     <td>{demand.cohort_name}</td>
                     <td>{demand.subject_name}</td>
-                    <td>1</td>
+                    <td>{demand.required_periods_per_cycle}</td>
+                    <td>{demand.required_double_lessons}</td>
                   </tr>
                 ))}
               </tbody>

@@ -37,23 +37,23 @@ func main() {
 	log.Println("temporal service: db connected")
 
 	// Repos
-	calendarRepo     := calendar.NewRepo(pool)
-	conflictRepo     := conflict.NewRepo(pool)
-	schedulingRepo   := scheduling.NewRepo(pool)
+	calendarRepo := calendar.NewRepo(pool)
+	conflictRepo := conflict.NewRepo(pool)
+	schedulingRepo := scheduling.NewRepo(pool)
 	availabilityRepo := availability.NewRepo(pool)
 	provisioningRepo := provisioning.NewRepo(pool)
-	launchRepo       := launch.NewRepo(pool)
+	launchRepo := launch.NewRepo(pool)
 
 	// Services
-	calendarService   := calendar.NewService(calendarRepo)
+	calendarService := calendar.NewService(calendarRepo)
 	schedulingService := scheduling.NewService(schedulingRepo, conflictRepo, availabilityRepo)
 
 	// Handlers
-	calendarHandler     := calendar.NewHandler(calendarService)
-	schedulingHandler   := scheduling.NewHandler(schedulingService)
+	calendarHandler := calendar.NewHandler(calendarService)
+	schedulingHandler := scheduling.NewHandler(schedulingService)
 	availabilityHandler := availability.NewHandler(availabilityRepo)
-	conflictHandler     := conflict.NewHandler(conflictRepo)
-	eventHandler        := events.NewHandler(calendarService, schedulingService, availabilityRepo)
+	conflictHandler := conflict.NewHandler(conflictRepo)
+	eventHandler := events.NewHandler(calendarService, schedulingService, availabilityRepo)
 	provisioningHandler := provisioning.NewHandler(
 		provisioningRepo,
 		cfg.ScholaroscopeWebhookSecret,
@@ -80,24 +80,24 @@ func main() {
 	mux.HandleFunc("GET /plugin/manifest.json", manifestHandler.PluginManifest)
 
 	// Calendar routes
-	mux.HandleFunc("POST /orgs/{orgId}/calendar",                        launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.CreateCalendar))
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/active",                  launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.GetActiveCalendar))
-	mux.HandleFunc("POST /orgs/{orgId}/calendar/{versionId}/activate",   launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.ActivateCalendar))
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/slots",       launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.GetTimeSlots))
+	mux.HandleFunc("POST /orgs/{orgId}/calendar", launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.CreateCalendar))
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/active", launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.GetActiveCalendar))
+	mux.HandleFunc("POST /orgs/{orgId}/calendar/{versionId}/activate", launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.ActivateCalendar))
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/slots", launchHandler.RequirePortalPermission("timetable.manage", calendarHandler.GetTimeSlots))
 
 	// Scheduling routes
-	mux.HandleFunc("POST /orgs/{orgId}/sessions/{sessionId}/schedule",   launchHandler.RequirePortalPermission("timetable.manage", schedulingHandler.ScheduleSession))
+	mux.HandleFunc("POST /orgs/{orgId}/sessions/{sessionId}/schedule", launchHandler.RequirePortalPermission("timetable.manage", schedulingHandler.ScheduleSession))
 	mux.HandleFunc("DELETE /orgs/{orgId}/sessions/{sessionId}/schedule", launchHandler.RequirePortalPermission("timetable.manage", schedulingHandler.UnscheduleSession))
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/timetable",   launchHandler.RequirePortalPermission("timetable.manage", schedulingHandler.GetTimetable))
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/timetable", launchHandler.RequirePortalPermission("timetable.manage", schedulingHandler.GetTimetable))
 
 	// Availability routes
 	mux.HandleFunc("PUT /orgs/{orgId}/teachers/{teacherId}/availability", launchHandler.RequirePortalPermission("timetable.manage", availabilityHandler.SetAvailability))
 	mux.HandleFunc("GET /orgs/{orgId}/teachers/{teacherId}/availability", launchHandler.RequirePortalPermission("timetable.manage", availabilityHandler.GetAvailability))
 
 	// Conflict routes
-	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/conflicts",   launchHandler.RequirePortalPermission("timetable.manage", conflictHandler.ListUnresolved))
-	mux.HandleFunc("POST /orgs/{orgId}/conflicts/{conflictId}/resolve",  launchHandler.RequirePortalPermission("timetable.conflicts.resolve", conflictHandler.Resolve))
-	mux.HandleFunc("GET /orgs/{orgId}/conflicts/summary",                launchHandler.RequirePortalPermission("timetable.manage", conflictHandler.Summary))
+	mux.HandleFunc("GET /orgs/{orgId}/calendar/{versionId}/conflicts", launchHandler.RequirePortalPermission("timetable.manage", conflictHandler.ListUnresolved))
+	mux.HandleFunc("POST /orgs/{orgId}/conflicts/{conflictId}/resolve", launchHandler.RequirePortalPermission("timetable.conflicts.resolve", conflictHandler.Resolve))
+	mux.HandleFunc("GET /orgs/{orgId}/conflicts/summary", launchHandler.RequirePortalPermission("timetable.manage", conflictHandler.Summary))
 
 	// Kernel event webhook routes
 	mux.HandleFunc("POST /integration/scholaroscope/events", provisioningHandler.HandleScholaroscopeEvent)
@@ -109,6 +109,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/workspace", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Workspace))
 	mux.HandleFunc("GET /api/v1/calendar", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.GetCalendar))
 	mux.HandleFunc("PUT /api/v1/calendar", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.PutCalendar))
+	mux.HandleFunc("POST /api/v1/versions/{versionId}/generate", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.GenerateVersion))
 	mux.HandleFunc("GET /api/v1/exceptions", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.CalendarExceptions))
 	mux.HandleFunc("GET /api/v1/teachers", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Teachers))
 	mux.HandleFunc("GET /api/v1/availability", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Availability))
@@ -127,10 +128,10 @@ func main() {
 	mux.HandleFunc("POST /api/v1/timetable-versions/{versionId}/validate", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.ValidateVersion))
 	mux.HandleFunc("POST /api/v1/timetable-versions/{versionId}/publish", launchHandler.RequirePortalSession("timetable.publish", portalAPIHandler.PublishVersion))
 
-	mux.HandleFunc("POST /events/session.created",      eventHandler.Deprecated)
-	mux.HandleFunc("POST /events/session.deleted",      eventHandler.Deprecated)
-	mux.HandleFunc("POST /events/teacher.assigned",     eventHandler.Deprecated)
-	mux.HandleFunc("POST /events/teacher.unassigned",   eventHandler.Deprecated)
+	mux.HandleFunc("POST /events/session.created", eventHandler.Deprecated)
+	mux.HandleFunc("POST /events/session.deleted", eventHandler.Deprecated)
+	mux.HandleFunc("POST /events/teacher.assigned", eventHandler.Deprecated)
+	mux.HandleFunc("POST /events/teacher.unassigned", eventHandler.Deprecated)
 	mux.HandleFunc("POST /events/org.calendar.updated", eventHandler.Deprecated)
 
 	log.Printf("temporal service: listening on :%s", cfg.Port)

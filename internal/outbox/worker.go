@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -25,12 +26,12 @@ const (
 )
 
 type Worker struct {
-	pool          *pgxpool.Pool
-	fallbackURL   string
-	httpClient    *http.Client
-	maxAttempts   int
-	batchSize     int
-	pollInterval  time.Duration
+	pool         *pgxpool.Pool
+	fallbackURL  string
+	httpClient   *http.Client
+	maxAttempts  int
+	batchSize    int
+	pollInterval time.Duration
 }
 
 type Config struct {
@@ -42,22 +43,22 @@ type Config struct {
 }
 
 type Event struct {
-	ID                    uuid.UUID
-	WorkspaceID           uuid.UUID
-	InstallationID        uuid.UUID
-	EventType             string
-	SchemaVersion         string
-	AggregateType         string
-	AggregateUUID         uuid.UUID
-	AggregateVersion      *int64
-	CorrelationID         uuid.UUID
-	IdempotencyKey        string
-	Payload               map[string]any
-	Attempts              int
-	ScholaroscopeRef      string
-	SigningSecret         string
-	SigningKeyID          string
-	CallbackURL           *string
+	ID               uuid.UUID
+	WorkspaceID      uuid.UUID
+	InstallationID   uuid.UUID
+	EventType        string
+	SchemaVersion    string
+	AggregateType    string
+	AggregateUUID    uuid.UUID
+	AggregateVersion *int64
+	CorrelationID    uuid.UUID
+	IdempotencyKey   string
+	Payload          map[string]any
+	Attempts         int
+	ScholaroscopeRef string
+	SigningSecret    string
+	SigningKeyID     string
+	CallbackURL      *string
 }
 
 func NewWorker(pool *pgxpool.Pool, cfg Config) *Worker {
@@ -74,11 +75,11 @@ func NewWorker(pool *pgxpool.Pool, cfg Config) *Worker {
 		cfg.PollInterval = 30 * time.Second
 	}
 	return &Worker{
-		pool: pool,
-		fallbackURL: cfg.FallbackCallbackURL,
-		httpClient: &http.Client{Timeout: cfg.RequestTimeout},
-		maxAttempts: cfg.MaxAttempts,
-		batchSize: cfg.BatchSize,
+		pool:         pool,
+		fallbackURL:  cfg.FallbackCallbackURL,
+		httpClient:   &http.Client{Timeout: cfg.RequestTimeout},
+		maxAttempts:  cfg.MaxAttempts,
+		batchSize:    cfg.BatchSize,
 		pollInterval: cfg.PollInterval,
 	}
 }
@@ -182,18 +183,18 @@ func (w *Worker) deliver(ctx context.Context, event Event) error {
 		return fmt.Errorf("callback URL is not configured")
 	}
 	body, err := json.Marshal(map[string]any{
-		"event_id": event.ID.String(),
-		"event_type": event.EventType,
-		"schema_version": event.SchemaVersion,
-		"occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
-		"workspace_uuid": event.WorkspaceID.String(),
+		"event_id":                event.ID.String(),
+		"event_type":              event.EventType,
+		"schema_version":          event.SchemaVersion,
+		"occurred_at":             time.Now().UTC().Format(time.RFC3339Nano),
+		"workspace_uuid":          event.WorkspaceID.String(),
 		"plugin_installation_ref": event.ScholaroscopeRef,
-		"aggregate_type": event.AggregateType,
-		"aggregate_uuid": event.AggregateUUID.String(),
-		"aggregate_version": event.AggregateVersion,
-		"correlation_id": event.CorrelationID.String(),
-		"idempotency_key": event.IdempotencyKey,
-		"payload": event.Payload,
+		"aggregate_type":          event.AggregateType,
+		"aggregate_uuid":          event.AggregateUUID.String(),
+		"aggregate_version":       event.AggregateVersion,
+		"correlation_id":          event.CorrelationID.String(),
+		"idempotency_key":         event.IdempotencyKey,
+		"payload":                 event.Payload,
 	})
 	if err != nil {
 		w.retry(ctx, event, err.Error())
@@ -230,10 +231,10 @@ func (w *Worker) deliver(ctx context.Context, event Event) error {
 		resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound ||
 		resp.StatusCode == http.StatusGone || resp.StatusCode == http.StatusUnprocessableEntity {
 		w.deadLetter(ctx, event, message)
-		return fmt.Errorf(message)
+		return errors.New(message)
 	}
 	w.retry(ctx, event, message)
-	return fmt.Errorf(message)
+	return errors.New(message)
 }
 
 func (w *Worker) retry(ctx context.Context, event Event, message string) {

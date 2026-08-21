@@ -2,6 +2,7 @@ package calendar
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -26,8 +27,8 @@ func (h *Handler) CreateCalendar(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		LearningDays        []string      `json:"learning_days"`
-		DayStartTime        string        `json:"day_start_time"`  // "08:00"
-		DayEndTime          string        `json:"day_end_time"`    // "17:00"
+		DayStartTime        string        `json:"day_start_time"` // "08:00"
+		DayEndTime          string        `json:"day_end_time"`   // "17:00"
 		SlotDurationMinutes int16         `json:"slot_duration_minutes"`
 		BreakStructure      []BreakWindow `json:"break_structure"`
 	}
@@ -56,6 +57,11 @@ func (h *Handler) CreateCalendar(w http.ResponseWriter, r *http.Request) {
 		BreakStructure:      body.BreakStructure,
 	})
 	if err != nil {
+		var validation *ValidationError
+		if errors.As(err, &validation) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"code": validation.Code, "message": validation.Message, "field_errors": map[string][]string{validation.Field: {validation.Message}}}})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

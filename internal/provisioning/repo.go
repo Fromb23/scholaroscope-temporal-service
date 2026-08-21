@@ -116,11 +116,11 @@ func (r *Repo) BootstrapWorkspace(ctx context.Context, payload BootstrapPayload)
 	}
 
 	ackPayload, _ := json.Marshal(map[string]any{
-		"workspace_uuid": workspaceID.String(),
-		"external_workspace_uuid": workspaceID.String(),
-		"plugin_installation_ref": payload.PluginInstallationRef,
-		"status": "READY",
-		"actor_count": len(payload.AcademicSync.Actors),
+		"workspace_uuid":            workspaceID.String(),
+		"external_workspace_uuid":   workspaceID.String(),
+		"plugin_installation_ref":   payload.PluginInstallationRef,
+		"status":                    "READY",
+		"actor_count":               len(payload.AcademicSync.Actors),
 		"teaching_assignment_count": len(payload.AcademicSync.TeachingAssignments),
 	})
 	_, err = tx.Exec(ctx, `
@@ -452,6 +452,13 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 		}
 	}
 	for _, assignment := range sync.TeachingAssignments {
+		if strings.TrimSpace(assignment.SourceModel) == "" {
+			assignment.SourceModel = "academic.CohortSubjectInstructor"
+		}
+		requirements, err := json.Marshal(assignment.SchedulingRequirements)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: marshal scheduling requirements: %w", err)
+		}
 		id, err := uuid.Parse(assignment.TeachingAssignmentUUID)
 		if err != nil {
 			return fmt.Errorf("provisioning repo: invalid assignment uuid: %w", err)
@@ -476,9 +483,11 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 			INSERT INTO external_teaching_assignment (
 				id, workspace_id, scholaroscope_teaching_assignment_ref, teacher_uuid,
 				cohort_subject_uuid, cohort_uuid, subject_uuid, teacher_ref,
-				cohort_subject_ref, cohort_ref, subject_ref, subject_name, cohort_name, status
+				cohort_subject_ref, cohort_ref, subject_ref, subject_name, cohort_name,
+				source_model, source_id, academic_year_ref, scheduling_requirements, status
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE(NULLIF($14, ''), 'ACTIVE'))
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+			        $14, $15, $16, $17::jsonb, COALESCE(NULLIF($18, ''), 'ACTIVE'))
 			ON CONFLICT (workspace_id, scholaroscope_teaching_assignment_ref)
 			DO UPDATE SET teacher_uuid = EXCLUDED.teacher_uuid,
 			              cohort_subject_uuid = EXCLUDED.cohort_subject_uuid,
@@ -490,12 +499,17 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 			              subject_ref = EXCLUDED.subject_ref,
 			              subject_name = EXCLUDED.subject_name,
 			              cohort_name = EXCLUDED.cohort_name,
+			              source_model = EXCLUDED.source_model,
+			              source_id = EXCLUDED.source_id,
+			              academic_year_ref = EXCLUDED.academic_year_ref,
+			              scheduling_requirements = EXCLUDED.scheduling_requirements,
 			              status = EXCLUDED.status,
 			              updated_at = now()`,
 			id, workspaceID, assignment.TeachingAssignmentRef, teacherID,
 			cohortSubjectID, cohortID, subjectID, assignment.TeacherRef,
 			assignment.CohortSubjectRef, assignment.CohortRef, assignment.SubjectRef,
-			assignment.SubjectName, assignment.CohortName, assignment.Status,
+			assignment.SubjectName, assignment.CohortName, assignment.SourceModel,
+			assignment.SourceID, assignment.AcademicYearRef, string(requirements), assignment.Status,
 		)
 		if err != nil {
 			return fmt.Errorf("provisioning repo: upsert teaching assignment: %w", err)

@@ -26,44 +26,27 @@ type CreateCalendarInput struct {
 	BreakStructure      []BreakWindow
 }
 
+type ValidationError struct {
+	Code    string `json:"code"`
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+func (e *ValidationError) Error() string { return e.Message }
+
+func validationError(code, field, message string) error {
+	return &ValidationError{Code: code, Field: field, Message: message}
+}
+
 // CreateCalendarWithSlots creates a new calendar version and generates
 // all time slots from it in one operation. Does not activate it.
 func (s *Service) CreateCalendarWithSlots(ctx context.Context, orgID uuid.UUID, input *CreateCalendarInput) (*OrgCalendarVersion, []TimeSlot, error) {
-	if len(input.LearningDays) == 0 {
-		return nil, nil, fmt.Errorf("calendar service: at least one learning day is required")
-	}
-	if input.SlotDurationMinutes <= 0 {
-		return nil, nil, fmt.Errorf("calendar service: slot duration must be positive")
-	}
-	if !input.DayEndTime.After(input.DayStartTime) {
-		return nil, nil, fmt.Errorf("calendar service: day end time must be after start time")
-	}
-	if err := validateBreakStructure(input.DayStartTime, input.DayEndTime, input.BreakStructure); err != nil {
-		return nil, nil, err
-	}
-	// Determine next version number for this org
-	nextVersion, err := s.repo.NextVersionNumber(ctx, orgID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("calendar service: get next version: %w", err)
-	}
-
-	version := &OrgCalendarVersion{
-		ID:                  uuid.New(),
-		OrgID:               orgID,
-		VersionNumber:       nextVersion,
-		LearningDays:        normalizeLearningDays(input.LearningDays),
-		DayStartTime:        input.DayStartTime,
-		DayEndTime:          input.DayEndTime,
-		SlotDurationMinutes: input.SlotDurationMinutes,
-		BreakStructure:      input.BreakStructure,
-		IsActive:            false,
-	}
+	version, slots, err := s.buildCalendarVersion(ctx, orgID, input)
+	if err != nil { return nil, nil, err }
 
 	if err := s.repo.CreateCalendarVersion(ctx, version); err != nil {
 		return nil, nil, fmt.Errorf("calendar service: create version: %w", err)
 	}
-
-	slots := generateTimeSlots(version)
 
 	if err := s.repo.BulkInsertTimeSlots(ctx, slots); err != nil {
 		return nil, nil, fmt.Errorf("calendar service: persist slots: %w", err)
@@ -88,13 +71,13 @@ func (s *Service) CreateCalendarWithSlotsActivated(ctx context.Context, orgID uu
 
 func (s *Service) buildCalendarVersion(ctx context.Context, orgID uuid.UUID, input *CreateCalendarInput) (*OrgCalendarVersion, []TimeSlot, error) {
 	if len(input.LearningDays) == 0 {
-		return nil, nil, fmt.Errorf("calendar service: at least one learning day is required")
+		return nil, nil, validationError("LEARNING_DAYS_REQUIRED", "learning_days", "Select at least one learning day.")
 	}
 	if input.SlotDurationMinutes <= 0 {
-		return nil, nil, fmt.Errorf("calendar service: slot duration must be positive")
+		return nil, nil, validationError("INVALID_PERIOD_DURATION", "slot_duration_minutes", "Teaching-period duration must be greater than zero.")
 	}
 	if !input.DayEndTime.After(input.DayStartTime) {
-		return nil, nil, fmt.Errorf("calendar service: day end time must be after start time")
+		return nil, nil, validationError("INVALID_DAY_RANGE", "day_end_time", "School-day end time must be after its start time.")
 	}
 	if err := validateBreakStructure(input.DayStartTime, input.DayEndTime, input.BreakStructure); err != nil {
 		return nil, nil, err
@@ -115,9 +98,33 @@ func (s *Service) buildCalendarVersion(ctx context.Context, orgID uuid.UUID, inp
 		IsActive:            false,
 	}
 	if len(version.LearningDays) == 0 {
-		return nil, nil, fmt.Errorf("calendar service: at least one valid learning day is required")
+		return nil, nil, validationError("INVALID_LEARNING_DAYS", "learning_days", "No valid learning day was supplied.")
 	}
-	return version, generateTimeSlots(version), nil
+	if hasDuplicateDays(version.LearningDays) {
+		return nil, nil, validationError("DUPLICATE_LEARNING_DAY", "learning_days", "Each learning day may be selected only once.")
+	}
+	slots := generateTimeSlots(version)
+	if err := validateGeneratedLessonSlots(slots, input.SlotDurationMinutes); err != nil {
+		return nil, nil, err
+	}
+	return version, slots, nil
+}
+
+func validateGeneratedLessonSlots(slots []TimeSlot, durationMinutes int16) error {
+	lessonCount := 0
+	for _, slot := range slots {
+		if slot.SlotType != SlotTypeLesson {
+			continue
+		}
+		lessonCount++
+		if slot.EndTime.Sub(slot.StartTime) != time.Duration(durationMinutes)*time.Minute {
+			return validationError("PARTIAL_TEACHING_PERIOD", "day_end_time", "The day bounds and non-teaching periods leave a shortened teaching period. Adjust the end time, breaks, or period duration.")
+		}
+	}
+	if lessonCount == 0 {
+		return validationError("NO_TEACHING_PERIODS", "break_structure", "This configuration leaves no teaching periods.")
+	}
+	return nil
 }
 
 // GenerateAndPersistTimeSlots regenerates slots for an existing version.
@@ -176,16 +183,25 @@ func generateTimeSlots(v *OrgCalendarVersion) []TimeSlot {
 }
 
 func validateBreakStructure(dayStart, dayEnd time.Time, breaks []BreakWindow) error {
-	parsed := parsedBreaks(breaks)
+	parsed := make([]breakRange, 0, len(breaks))
+	for index, window := range breaks {
+		start, startErr := time.Parse("15:04", window.StartTime)
+		end, endErr := time.Parse("15:04", window.EndTime)
+		if startErr != nil || endErr != nil {
+			return validationError("INVALID_NON_TEACHING_TIME", fmt.Sprintf("break_structure.%d", index), fmt.Sprintf("Non-teaching period %d must use valid 24-hour start and end times.", index+1))
+		}
+		parsed = append(parsed, breakRange{start: start, end: end})
+	}
+	sort.Slice(parsed, func(i, j int) bool { return parsed[i].start.Before(parsed[j].start) })
 	for i, item := range parsed {
 		if !item.end.After(item.start) {
-			return fmt.Errorf("calendar service: break %d end time must be after start time", i)
+			return validationError("INVALID_NON_TEACHING_RANGE", "break_structure", fmt.Sprintf("Non-teaching period %d must end after it starts.", i+1))
 		}
 		if item.start.Before(dayStart) || item.end.After(dayEnd) {
-			return fmt.Errorf("calendar service: break %d must be inside the school day", i)
+			return validationError("NON_TEACHING_OUTSIDE_DAY", "break_structure", fmt.Sprintf("Non-teaching period %d must be inside the school day.", i+1))
 		}
 		if i > 0 && item.start.Before(parsed[i-1].end) {
-			return fmt.Errorf("calendar service: breaks must not overlap")
+			return validationError("OVERLAPPING_NON_TEACHING_PERIODS", "break_structure", "Breaks and named non-teaching periods must not overlap.")
 		}
 	}
 	return nil
@@ -240,6 +256,18 @@ func normalizeLearningDays(days []string) []string {
 	return normalized
 }
 
+func hasDuplicateDays(days []string) bool {
+	seen := map[string]bool{}
+	for _, day := range days {
+		canonical := fmt.Sprintf("%d", DayOfWeekFromString[day])
+		if seen[canonical] {
+			return true
+		}
+		seen[canonical] = true
+	}
+	return false
+}
+
 func resolveSlotType(start, end time.Time, breaks []BreakWindow) SlotType {
 	for _, b := range breaks {
 		breakStart, err1 := time.Parse("15:04", b.StartTime)
@@ -248,7 +276,16 @@ func resolveSlotType(start, end time.Time, breaks []BreakWindow) SlotType {
 			continue
 		}
 		if start.Before(breakEnd) && end.After(breakStart) {
-			return SlotTypeBreak
+			switch strings.ToUpper(strings.TrimSpace(b.Kind)) {
+			case "LUNCH":
+				return SlotTypeLunch
+			case "ASSEMBLY":
+				return SlotTypeAssembly
+			case "NON_TEACHING":
+				return SlotTypeNonTeaching
+			default:
+				return SlotTypeBreak
+			}
 		}
 	}
 	return SlotTypeLesson
