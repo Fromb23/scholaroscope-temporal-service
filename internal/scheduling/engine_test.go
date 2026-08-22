@@ -137,6 +137,110 @@ func TestAvailabilityAndScarceResourceScenario(t *testing.T) {
 	}
 }
 
+func TestCohortSpecificActivitiesDoNotGloballyBlockOtherClasses(t *testing.T) {
+	problem := EngineProblem{
+		WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term",
+		Periods: []EnginePeriod{{ID: "p1", Day: 0, Index: 0, Teaching: true, Mandatory: true}},
+		Teachers: map[string]EngineTeacher{
+			"pe-teacher":   {ID: "pe-teacher", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+			"math-teacher": {ID: "math-teacher", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+		},
+		Cohorts: map[string]EngineCohort{
+			"green":  {ID: "green", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+			"yellow": {ID: "yellow", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+		},
+		Registrations: map[string]map[string]bool{"green": {"green-pe": true}, "yellow": {"yellow-math": true}},
+		Assignments: []EngineAssignment{
+			{ID: "green-pe", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "pe-teacher", CohortID: "green", CohortSubjectID: "green-pe", SubjectID: "pe", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "yellow-math", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "math-teacher", CohortID: "yellow", CohortSubjectID: "yellow-math", SubjectID: "math", WeeklyPeriods: 1, Mandatory: true, Active: true},
+		},
+	}
+	report := ValidateSchedule(problem, []EnginePlacement{
+		{AssignmentID: "green-pe", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "pe-teacher", CohortID: "green", CohortSubjectID: "green-pe", SubjectID: "pe", PeriodIDs: []string{"p1"}},
+		{AssignmentID: "yellow-math", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "math-teacher", CohortID: "yellow", CohortSubjectID: "yellow-math", SubjectID: "math", PeriodIDs: []string{"p1"}},
+	}, EngineConfig{})
+	if !report.Valid {
+		t.Fatalf("cohort-specific PE should not block another class: %+v", firstFailure(report))
+	}
+}
+
+func TestSchoolWideBreakBlocksEveryCohort(t *testing.T) {
+	problem := EngineProblem{
+		WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term",
+		Periods: []EnginePeriod{{ID: "break", Day: 0, Index: 0, Teaching: false}},
+		Teachers: map[string]EngineTeacher{"teacher": {ID: "teacher", WorkspaceID: "workspace", Unavailable: map[string]bool{}}},
+		Cohorts: map[string]EngineCohort{"green": {ID: "green", WorkspaceID: "workspace", Unavailable: map[string]bool{}}, "yellow": {ID: "yellow", WorkspaceID: "workspace", Unavailable: map[string]bool{}}},
+		Registrations: map[string]map[string]bool{"green": {"green-math": true}, "yellow": {"yellow-math": true}},
+		Assignments: []EngineAssignment{{ID: "green-math", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher", CohortID: "green", CohortSubjectID: "green-math", SubjectID: "math", WeeklyPeriods: 1, Mandatory: true, Active: true}},
+	}
+	report := ValidateSchedule(problem, []EnginePlacement{{AssignmentID: "green-math", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher", CohortID: "green", CohortSubjectID: "green-math", SubjectID: "math", PeriodIDs: []string{"break"}}}, EngineConfig{})
+	if report.Valid || !hasFailedInvariant(report, "NON_TEACHING_PERIOD_EXCLUSION") {
+		t.Fatalf("school-wide break should reject all lesson placement: %+v", report.Results)
+	}
+}
+
+func TestLifeSkillsCanRunBesideICTButTeacherCannotDoubleBook(t *testing.T) {
+	problem := EngineProblem{
+		WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term",
+		Periods: []EnginePeriod{{ID: "p1", Day: 0, Index: 0, Teaching: true, Mandatory: true}},
+		Teachers: map[string]EngineTeacher{
+			"shared-teacher": {ID: "shared-teacher", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+			"ict-teacher":    {ID: "ict-teacher", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+		},
+		Cohorts: map[string]EngineCohort{"green": {ID: "green", WorkspaceID: "workspace", Unavailable: map[string]bool{}}, "yellow": {ID: "yellow", WorkspaceID: "workspace", Unavailable: map[string]bool{}}},
+		Registrations: map[string]map[string]bool{"green": {"green-life": true}, "yellow": {"yellow-ict": true}},
+		Assignments: []EngineAssignment{
+			{ID: "green-life", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "shared-teacher", CohortID: "green", CohortSubjectID: "green-life", SubjectID: "life", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "yellow-ict", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "ict-teacher", CohortID: "yellow", CohortSubjectID: "yellow-ict", SubjectID: "ict", WeeklyPeriods: 1, Mandatory: true, Active: true},
+		},
+	}
+	valid := ValidateSchedule(problem, []EnginePlacement{
+		{AssignmentID: "green-life", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "shared-teacher", CohortID: "green", CohortSubjectID: "green-life", SubjectID: "life", PeriodIDs: []string{"p1"}},
+		{AssignmentID: "yellow-ict", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "ict-teacher", CohortID: "yellow", CohortSubjectID: "yellow-ict", SubjectID: "ict", PeriodIDs: []string{"p1"}},
+	}, EngineConfig{})
+	if !valid.Valid {
+		t.Fatalf("Life Skills and ICT in separate cohorts should be valid: %+v", firstFailure(valid))
+	}
+	doubleBookedProblem := problem
+	doubleBookedProblem.Assignments = append([]EngineAssignment(nil), problem.Assignments...)
+	doubleBookedProblem.Assignments[1].TeacherID = "shared-teacher"
+	conflict := ValidateSchedule(doubleBookedProblem, []EnginePlacement{
+		{AssignmentID: "green-life", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "shared-teacher", CohortID: "green", CohortSubjectID: "green-life", SubjectID: "life", PeriodIDs: []string{"p1"}},
+		{AssignmentID: "yellow-ict", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "shared-teacher", CohortID: "yellow", CohortSubjectID: "yellow-ict", SubjectID: "ict", PeriodIDs: []string{"p1"}},
+	}, EngineConfig{})
+	if conflict.Valid || !hasFailedInvariant(conflict, "NO_TEACHER_DOUBLE_BOOKING") {
+		t.Fatalf("teacher supervising two cohorts at the same time should fail: %+v", conflict.Results)
+	}
+}
+
+func TestExclusivePEResourceAndTransitionBoundary(t *testing.T) {
+	problem := EngineProblem{
+		WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term",
+		Periods: []EnginePeriod{{ID: "p1", Day: 0, Index: 0, Teaching: true, Mandatory: true}, {ID: "transition", Day: 0, Index: 1, Teaching: false}, {ID: "p2", Day: 0, Index: 2, Teaching: true, Mandatory: true}},
+		Teachers: map[string]EngineTeacher{"t1": {ID: "t1", WorkspaceID: "workspace", Unavailable: map[string]bool{}}, "t2": {ID: "t2", WorkspaceID: "workspace", Unavailable: map[string]bool{}}},
+		Cohorts: map[string]EngineCohort{"green": {ID: "green", WorkspaceID: "workspace", Unavailable: map[string]bool{}}, "yellow": {ID: "yellow", WorkspaceID: "workspace", Unavailable: map[string]bool{}}},
+		Resources: map[string]EngineResource{"field": {ID: "field", WorkspaceID: "workspace", Capacity: 1, Unavailable: map[string]bool{}}},
+		Registrations: map[string]map[string]bool{"green": {"green-pe": true}, "yellow": {"yellow-pe": true}},
+		Assignments: []EngineAssignment{
+			{ID: "green-pe", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "t1", CohortID: "green", CohortSubjectID: "green-pe", SubjectID: "pe", ResourceID: "field", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "yellow-pe", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "t2", CohortID: "yellow", CohortSubjectID: "yellow-pe", SubjectID: "pe", ResourceID: "field", WeeklyPeriods: 1, Mandatory: true, Active: true},
+		},
+	}
+	resourceConflict := ValidateSchedule(problem, []EnginePlacement{
+		{AssignmentID: "green-pe", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "t1", CohortID: "green", CohortSubjectID: "green-pe", SubjectID: "pe", ResourceID: "field", PeriodIDs: []string{"p1"}},
+		{AssignmentID: "yellow-pe", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "t2", CohortID: "yellow", CohortSubjectID: "yellow-pe", SubjectID: "pe", ResourceID: "field", PeriodIDs: []string{"p1"}},
+	}, EngineConfig{})
+	if resourceConflict.Valid || !hasFailedInvariant(resourceConflict, "RESOURCE_EXCLUSIVITY") {
+		t.Fatalf("exclusive PE resource collision should fail: %+v", resourceConflict.Results)
+	}
+	doubleAcrossTransition := ValidateSchedule(problem, []EnginePlacement{
+		{AssignmentID: "green-pe", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "t1", CohortID: "green", CohortSubjectID: "green-pe", SubjectID: "pe", ResourceID: "field", PeriodIDs: []string{"p1", "p2"}, Double: true},
+	}, EngineConfig{})
+	if doubleAcrossTransition.Valid || !hasFailedInvariant(doubleAcrossTransition, "DOUBLE_LESSON_CONTIGUITY") {
+		t.Fatalf("double lesson crossing transition should fail: %+v", doubleAcrossTransition.Results)
+	}
+}
+
 func TestPreflightClassifiesSimultaneousTeacherShortage(t *testing.T) {
 	problem, _ := GenerateFeasibleSimulation(SimulationProfile{Name: "infeasible", Teachers: 2, Cohorts: 2, Subjects: 4, Days: 1, PeriodsPerDay: 4})
 	delete(problem.Teachers, "teacher-0001")
@@ -217,6 +321,15 @@ func firstFailure(report ValidationReport) *InvariantResult {
 func hasIssue(report FeasibilityReport, code string) bool {
 	for _, issue := range report.Issues {
 		if issue.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFailedInvariant(report ValidationReport, invariant string) bool {
+	for _, result := range report.Results {
+		if result.Invariant == invariant && !result.Passed {
 			return true
 		}
 	}

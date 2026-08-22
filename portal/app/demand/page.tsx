@@ -30,6 +30,9 @@ export default function DemandPage() {
                   <th>Subject</th>
                   <th>Periods/cycle</th>
                   <th>Double lessons</th>
+                  <th>Scheduled</th>
+                  <th>Source</th>
+                  <th>Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -38,8 +41,11 @@ export default function DemandPage() {
                     <td>{demand.teacher_name}</td>
                     <td>{demand.cohort_name}</td>
                     <td>{demand.subject_name}</td>
-                    <td>{demand.required_periods_per_cycle}</td>
+                    <td>{demand.required_periods_per_cycle ?? "Not configured"}</td>
                     <td>{demand.required_double_lessons}</td>
+                    <td>{demand.scheduled_periods}</td>
+                    <td>{demand.demand_source.replaceAll("_", " ").toLowerCase()}</td>
+                    <td>{demand.demand_status.replaceAll("_", " ").toLowerCase()}</td>
                   </tr>
                 ))}
               </tbody>

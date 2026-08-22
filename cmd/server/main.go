@@ -117,6 +117,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/teachers", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Teachers))
 	mux.HandleFunc("GET /api/v1/availability", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Availability))
 	mux.HandleFunc("GET /api/v1/teaching-demands", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.TeachingDemands))
+	mux.HandleFunc("PATCH /api/v1/teaching-demands/{assignmentId}", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.TeachingDemandDetail))
 	mux.HandleFunc("GET /api/v1/rooms", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Rooms))
 	mux.HandleFunc("POST /api/v1/rooms", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.Rooms))
 	mux.HandleFunc("PATCH /api/v1/rooms/{roomId}", launchHandler.RequirePortalSession("timetable.manage", portalAPIHandler.RoomDetail))

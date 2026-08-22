@@ -236,7 +236,8 @@ func (h *Handler) ClassesSpaces(w http.ResponseWriter, r *http.Request, session 
 	}
 	rows, err := h.pool.Query(r.Context(), `
 		SELECT c.id, c.name, c.level, c.stream, c.enrollment_count, c.status,
-		       c.default_room_id, COALESCE(room.name, '')
+		       c.default_room_id, COALESCE(room.name, ''), room.capacity,
+		       COALESCE(room.exclusive, false), COALESCE(room.status, '')
 		FROM external_cohort c
 		LEFT JOIN room ON room.id = c.default_room_id AND room.workspace_id = c.workspace_id
 		WHERE c.workspace_id = $1
@@ -252,16 +253,21 @@ func (h *Handler) ClassesSpaces(w http.ResponseWriter, r *http.Request, session 
 	for rows.Next() {
 		var id uuid.UUID
 		var roomID *uuid.UUID
-		var name, level, stream, status, roomName string
+		var name, level, stream, status, roomName, roomStatus string
 		var enrollment int
-		if err := rows.Scan(&id, &name, &level, &stream, &enrollment, &status, &roomID, &roomName); err != nil {
+		var roomCapacity *int
+		var roomExclusive bool
+		if err := rows.Scan(&id, &name, &level, &stream, &enrollment, &status, &roomID, &roomName, &roomCapacity, &roomExclusive, &roomStatus); err != nil {
 			writeError(w, http.StatusInternalServerError, "classes_scan_failed")
 			return
 		}
+		capacityMismatch := roomCapacity != nil && enrollment > *roomCapacity
 		classes = append(classes, map[string]any{
 			"cohort_uuid": id.String(), "name": name, "level": level, "stream": stream,
 			"enrollment_count": enrollment, "status": status,
 			"default_room_uuid": uuidString(roomID), "default_room_name": roomName,
+			"default_room_capacity": roomCapacity, "default_room_exclusive": roomExclusive,
+			"default_room_status": roomStatus, "capacity_mismatch": capacityMismatch,
 		})
 	}
 	spaces, spaceErr := h.listRooms(r.Context(), session.WorkspaceID)
@@ -300,10 +306,26 @@ func (h *Handler) ClassDefaultRoom(w http.ResponseWriter, r *http.Request, sessi
 			writeError(w, http.StatusBadRequest, "invalid_room_uuid")
 			return
 		}
-		var count int
-		if h.pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM room WHERE id = $1 AND workspace_id = $2 AND status = 'ACTIVE'`, parsed, session.WorkspaceID).Scan(&count) != nil || count != 1 {
+		var exclusive bool
+		if h.pool.QueryRow(r.Context(), `SELECT exclusive FROM room WHERE id = $1 AND workspace_id = $2 AND status = 'ACTIVE'`, parsed, session.WorkspaceID).Scan(&exclusive) != nil {
 			writeError(w, http.StatusBadRequest, "reference_scope_mismatch")
 			return
+		}
+		if exclusive {
+			var assignedTo string
+			err := h.pool.QueryRow(r.Context(), `
+				SELECT name
+				FROM external_cohort
+				WHERE workspace_id = $1
+				  AND default_room_id = $2
+				  AND id <> $3
+				  AND status = 'ACTIVE'
+				ORDER BY name
+				LIMIT 1`, session.WorkspaceID, parsed, cohortID).Scan(&assignedTo)
+			if err == nil {
+				writeDomainError(w, http.StatusConflict, "exclusive_room_already_assigned", map[string]any{"assigned_class": assignedTo})
+				return
+			}
 		}
 		roomID = &parsed
 	}

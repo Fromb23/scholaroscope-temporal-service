@@ -152,34 +152,69 @@ func generateTimeSlots(v *OrgCalendarVersion) []TimeSlot {
 			continue
 		}
 
-		slotIndex := int16(0)
 		breaks := parsedBreaks(v.BreakStructure)
 		current := v.DayStartTime
-
-		for current.Before(v.DayEndTime) {
-			next := nextBoundary(current, v.DayEndTime, v.SlotDurationMinutes, breaks)
-			if !next.After(current) {
-				break
+		slotIndex := int16(0)
+		appendSlot := func(start, end time.Time, slotType SlotType) {
+			if !end.After(start) {
+				return
 			}
-			slotType := resolveSlotType(current, next, v.BreakStructure)
-
 			slots = append(slots, TimeSlot{
 				ID:                uuid.New(),
 				OrgID:             v.OrgID,
 				CalendarVersionID: v.ID,
 				DayOfWeek:         dayOfWeek,
-				StartTime:         current,
-				EndTime:           next,
+				StartTime:         start,
+				EndTime:           end,
 				SlotIndex:         slotIndex,
 				SlotType:          slotType,
 			})
-
-			current = next
 			slotIndex++
+		}
+
+		for _, interruption := range breaks {
+			if interruption.end.Before(current) || interruption.end.Equal(current) {
+				continue
+			}
+			if interruption.start.After(current) {
+				current = appendTeachingSegment(&slots, v, dayOfWeek, slotIndex, current, interruption.start)
+				slotIndex = int16(len(slotsForDay(slots, dayOfWeek)))
+			}
+			appendSlot(interruption.start, interruption.end, resolveBreakSlotType(interruption, v.BreakStructure))
+			current = interruption.end
+		}
+		if current.Before(v.DayEndTime) {
+			current = appendTeachingSegment(&slots, v, dayOfWeek, slotIndex, current, v.DayEndTime)
+			_ = current
 		}
 	}
 
 	return slots
+}
+
+func appendTeachingSegment(slots *[]TimeSlot, v *OrgCalendarVersion, dayOfWeek int16, slotIndex int16, start, end time.Time) time.Time {
+	current := start
+	duration := time.Duration(v.SlotDurationMinutes) * time.Minute
+	for current.Add(duration).Before(end) || current.Add(duration).Equal(end) {
+		next := current.Add(duration)
+		*slots = append(*slots, TimeSlot{ID: uuid.New(), OrgID: v.OrgID, CalendarVersionID: v.ID, DayOfWeek: dayOfWeek, StartTime: current, EndTime: next, SlotIndex: slotIndex, SlotType: SlotTypeLesson})
+		slotIndex++
+		current = next
+	}
+	if current.Before(end) {
+		*slots = append(*slots, TimeSlot{ID: uuid.New(), OrgID: v.OrgID, CalendarVersionID: v.ID, DayOfWeek: dayOfWeek, StartTime: current, EndTime: end, SlotIndex: slotIndex, SlotType: SlotTypeTransition})
+	}
+	return end
+}
+
+func slotsForDay(slots []TimeSlot, dayOfWeek int16) []TimeSlot {
+	filtered := make([]TimeSlot, 0)
+	for _, slot := range slots {
+		if slot.DayOfWeek == dayOfWeek {
+			filtered = append(filtered, slot)
+		}
+	}
+	return filtered
 }
 
 func validateBreakStructure(dayStart, dayEnd time.Time, breaks []BreakWindow) error {
@@ -226,25 +261,6 @@ func parsedBreaks(breaks []BreakWindow) []breakRange {
 	return parsed
 }
 
-func nextBoundary(current, dayEnd time.Time, slotDurationMinutes int16, breaks []breakRange) time.Time {
-	next := current.Add(time.Duration(slotDurationMinutes) * time.Minute)
-	if next.After(dayEnd) {
-		next = dayEnd
-	}
-	for _, item := range breaks {
-		if current.Equal(item.start) {
-			return item.end
-		}
-		if current.Before(item.start) && item.start.Before(next) {
-			next = item.start
-		}
-		if current.Before(item.end) && item.end.Before(next) {
-			next = item.end
-		}
-	}
-	return next
-}
-
 func normalizeLearningDays(days []string) []string {
 	normalized := make([]string, 0, len(days))
 	for _, day := range days {
@@ -289,6 +305,29 @@ func resolveSlotType(start, end time.Time, breaks []BreakWindow) SlotType {
 		}
 	}
 	return SlotTypeLesson
+}
+
+func resolveBreakSlotType(item breakRange, breaks []BreakWindow) SlotType {
+	for _, b := range breaks {
+		breakStart, err1 := time.Parse("15:04", b.StartTime)
+		breakEnd, err2 := time.Parse("15:04", b.EndTime)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if item.start.Equal(breakStart) && item.end.Equal(breakEnd) {
+			switch strings.ToUpper(strings.TrimSpace(b.Kind)) {
+			case "LUNCH":
+				return SlotTypeLunch
+			case "ASSEMBLY":
+				return SlotTypeAssembly
+			case "NON_TEACHING":
+				return SlotTypeNonTeaching
+			default:
+				return SlotTypeBreak
+			}
+		}
+	}
+	return SlotTypeBreak
 }
 
 // GetSlotsForVersion exposes slot retrieval for event handlers.

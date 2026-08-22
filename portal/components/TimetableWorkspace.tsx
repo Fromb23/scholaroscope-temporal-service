@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiGet, apiSend, PortalApiError, type AcademicContextResponse, type CalendarResponse, type ClassesSpacesResponse, type TeachersResponse, type TeachingDemandResponse, type TimetableListResponse, type VersionDetail, type WorkflowResponse } from "../lib/api";
-import { configuredDays, dayLabels, lessonCardClass, periodRows, unscheduledPeriods, visibleEntries, type GridView } from "../lib/timetable-grid";
+import { configuredDays, dayLabels, lessonCardClass, periodRows, unconfiguredDemandCount, unscheduledPeriods, visibleEntries, type GridView } from "../lib/timetable-grid";
 
 type WorkspaceData = { workflow: WorkflowResponse; calendar: CalendarResponse; classesSpaces: ClassesSpacesResponse; teachers: TeachersResponse; demands: TeachingDemandResponse; timetables: TimetableListResponse; version: VersionDetail | null };
 
@@ -66,6 +66,7 @@ export function TimetableWorkspace() {
     return all;
   }, [data?.demands.demands, view]);
   const remaining = unscheduledPeriods(demands, entries);
+  const unconfigured = unconfiguredDemandCount(demands);
   const terms = academic?.academic_years.flatMap((year) => year.terms) ?? [];
 
   async function runAction(action: "create" | "generate" | "validate" | "publish" | "revision") {
@@ -107,7 +108,7 @@ export function TimetableWorkspace() {
     {selectedTerm ? <section className="grid-toolbar" aria-label="Timetable view controls"><div className="segmented"><button className={view.kind === "CLASS" ? "active" : ""} onClick={() => setView({ kind: "CLASS", entityUuid: data?.classesSpaces.classes[0]?.cohort_uuid })}>Class</button><button className={view.kind === "TEACHER" ? "active" : ""} onClick={() => setView({ kind: "TEACHER", entityUuid: data?.teachers.teachers[0]?.actor_uuid })}>Teacher</button><button className={view.kind === "WORKSPACE" ? "active" : ""} onClick={() => setView({ kind: "WORKSPACE" })}>Whole school</button></div>
       {view.kind === "CLASS" ? <select aria-label="Select class" value={view.entityUuid ?? ""} onChange={(event) => setView({ kind: "CLASS", entityUuid: event.target.value })}>{data?.classesSpaces.classes.map((item) => <option key={item.cohort_uuid} value={item.cohort_uuid}>{item.name} · {item.enrollment_count} learners</option>)}</select> : null}
       {view.kind === "TEACHER" ? <select aria-label="Select teacher" value={view.entityUuid ?? ""} onChange={(event) => setView({ kind: "TEACHER", entityUuid: event.target.value })}>{data?.teachers.teachers.map((item) => <option key={item.actor_uuid} value={item.actor_uuid}>{item.display_name}</option>)}</select> : null}
-      <div className={remaining > 0 ? "demand-badge warning" : "demand-badge"}>{remaining > 0 ? `${remaining} lesson periods unscheduled` : "All required lesson periods scheduled"}</div>
+      <div className={remaining > 0 || unconfigured > 0 ? "demand-badge warning" : "demand-badge"}>{unconfigured > 0 ? `${unconfigured} teaching demands not configured` : remaining > 0 ? `${remaining} lesson periods unscheduled` : "All configured required lesson periods scheduled"}</div>
     </section> : null}
     {selectedTerm ? <WeeklyGrid calendar={data?.calendar ?? null} entries={entries} /> : <section className="empty"><h3>{academic && !academic.academic_years.length ? "No active academic year" : "No active term available"}</h3><p>{academic && !academic.academic_years.length ? "Set up an academic year in Scholaroscope, then refresh this workspace." : "Create or activate an academic term in Scholaroscope, then refresh this workspace."}</p></section>}
   </div>;
