@@ -140,8 +140,12 @@ export type TeachingDemand = {
   cohort_name: string;
   subject_uuid: string;
   subject_name: string;
-  required_periods_per_cycle: number;
+  required_periods_per_cycle: number | null;
   required_double_lessons: number;
+  scheduled_periods: number;
+  remaining_periods: number;
+  demand_source: "SCHOLAROSCOPE_SCHEME" | "SCHOLAROSCOPE_AUTHORITY" | "TIMETABLE_OVERRIDE" | "MISSING";
+  demand_status: "UNCONFIGURED" | "UNSCHEDULED" | "PARTIAL" | "COMPLETE" | "IMPOSSIBLE";
 };
 
 export type TeachingDemandResponse = {
@@ -207,6 +211,10 @@ export type ClassSummary = {
   status: string;
   default_room_uuid: string;
   default_room_name: string;
+  default_room_capacity: number | null;
+  default_room_exclusive: boolean;
+  default_room_status: string;
+  capacity_mismatch: boolean;
 };
 
 export type SpaceSummary = {

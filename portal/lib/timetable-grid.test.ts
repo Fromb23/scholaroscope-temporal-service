@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configuredDays, lessonCardClass, periodRows, unscheduledPeriods, visibleEntries } from "./timetable-grid";
+import { configuredDays, lessonCardClass, periodRows, unconfiguredDemandCount, unscheduledPeriods, visibleEntries } from "./timetable-grid";
 import type { CalendarResponse, TeachingDemand, TimetableEntry } from "./api";
 
 const calendar: CalendarResponse = {
@@ -41,6 +41,12 @@ describe("weekly timetable grid", () => {
   it("highlights remaining mandatory demand", () => {
     const demand = { teacher_uuid: "teacher", cohort_subject_uuid: "class-math", required_periods_per_cycle: 4 } as TeachingDemand;
     expect(unscheduledPeriods([demand], [doubleLesson])).toBe(2);
+  });
+
+  it("does not count missing demand as scheduled", () => {
+    const demand = { teacher_uuid: "teacher", cohort_subject_uuid: "class-math", required_periods_per_cycle: null, demand_status: "UNCONFIGURED" } as TeachingDemand;
+    expect(unscheduledPeriods([demand], [doubleLesson])).toBe(0);
+    expect(unconfiguredDemandCount([demand])).toBe(1);
   });
 
   it("marks hard conflicts on the affected lesson card", () => {

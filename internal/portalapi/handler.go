@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -1797,16 +1798,38 @@ func (h *Handler) TeachingDemands(w http.ResponseWriter, r *http.Request, sessio
 		       eta.cohort_subject_uuid, eta.cohort_uuid, eta.subject_uuid,
 		       eta.cohort_name, eta.subject_name, eta.teacher_ref,
 		       eta.cohort_subject_ref, eta.cohort_ref, eta.subject_ref, eta.status,
-		       COALESCE((eta.scheduling_requirements->>'weekly_lesson_requirement')::integer, 1),
-		       COALESCE((eta.scheduling_requirements->>'required_double_lessons')::integer, 0)
+		       COALESCE(override.weekly_lesson_requirement, (eta.scheduling_requirements->>'weekly_lesson_requirement')::integer),
+		       COALESCE(override.required_double_lessons, (eta.scheduling_requirements->>'required_double_lessons')::integer, 0),
+		       CASE
+		         WHEN override.weekly_lesson_requirement IS NOT NULL THEN 'TIMETABLE_OVERRIDE'
+		         WHEN eta.scheduling_requirements ? 'weekly_lesson_requirement'
+		           THEN COALESCE(NULLIF(eta.scheduling_requirements->>'demand_source', ''), CASE WHEN eta.scheduling_requirements ? 'scheme_ref' THEN 'SCHOLAROSCOPE_SCHEME' ELSE 'SCHOLAROSCOPE_AUTHORITY' END)
+		         ELSE 'MISSING'
+		       END,
+		       COALESCE(scheduled.scheduled_periods, 0)
 		FROM external_teaching_assignment eta
 		JOIN external_actor a ON a.workspace_id = eta.workspace_id AND a.id = eta.teacher_uuid
 		JOIN external_cohort cohort ON cohort.workspace_id = eta.workspace_id AND cohort.id = eta.cohort_uuid AND cohort.status = 'ACTIVE'
+		LEFT JOIN timetable_demand_override override
+		  ON override.workspace_id = eta.workspace_id
+		 AND override.academic_term_uuid = $3
+		 AND override.teaching_assignment_uuid = eta.id
+		LEFT JOIN LATERAL (
+		  SELECT COALESCE(SUM(entry.duration_periods), 0)::integer AS scheduled_periods
+		  FROM timetable_entry entry
+		  JOIN timetable_version version ON version.id = entry.timetable_version_id AND version.workspace_id = entry.workspace_id
+		  JOIN timetable timetable ON timetable.id = version.timetable_id AND timetable.workspace_id = version.workspace_id
+		  WHERE entry.workspace_id = eta.workspace_id
+		    AND timetable.academic_term_uuid = $3
+		    AND entry.teacher_uuid = eta.teacher_uuid
+		    AND entry.cohort_subject_uuid = eta.cohort_subject_uuid
+		    AND version.status <> 'ARCHIVED'
+		) scheduled ON TRUE
 		WHERE eta.workspace_id = $1
 		  AND eta.status = 'ACTIVE'
 		  AND cohort.academic_year_uuid = $2
 		ORDER BY eta.cohort_name, eta.subject_name, a.display_name`,
-		session.WorkspaceID, selected.AcademicYearID,
+		session.WorkspaceID, selected.AcademicYearID, selected.ID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "teaching_demands_query_failed")
@@ -1817,14 +1840,31 @@ func (h *Handler) TeachingDemands(w http.ResponseWriter, r *http.Request, sessio
 	for rows.Next() {
 		var id, teacherID, cohortSubjectID, cohortID, subjectID uuid.UUID
 		var teacherName, cohortName, subjectName, teacherRef, cohortSubjectRef, cohortRef, subjectRef, status string
-		var requiredPeriods, requiredDoubles int
+		var requiredPeriods pgtype.Int4
+		var requiredDoubles, scheduledPeriods int
+		var demandSource string
 		if err := rows.Scan(
 			&id, &teacherID, &teacherName, &cohortSubjectID, &cohortID, &subjectID,
 			&cohortName, &subjectName, &teacherRef, &cohortSubjectRef, &cohortRef, &subjectRef, &status,
-			&requiredPeriods, &requiredDoubles,
+			&requiredPeriods, &requiredDoubles, &demandSource, &scheduledPeriods,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "teaching_demands_scan_failed")
 			return
+		}
+		remainingPeriods := 0
+		demandStatus := "UNCONFIGURED"
+		var requiredPeriodsValue *int
+		if requiredPeriods.Valid {
+			value := int(requiredPeriods.Int32)
+			requiredPeriodsValue = &value
+			remainingPeriods = max(value-scheduledPeriods, 0)
+			if remainingPeriods == 0 {
+				demandStatus = "COMPLETE"
+			} else if scheduledPeriods > 0 {
+				demandStatus = "PARTIAL"
+			} else {
+				demandStatus = "UNSCHEDULED"
+			}
 		}
 		demands = append(demands, map[string]any{
 			"teaching_assignment_uuid":   id,
@@ -1840,8 +1880,12 @@ func (h *Handler) TeachingDemands(w http.ResponseWriter, r *http.Request, sessio
 			"subject_ref":                subjectRef,
 			"subject_name":               subjectName,
 			"status":                     status,
-			"required_periods_per_cycle": requiredPeriods,
+			"required_periods_per_cycle": requiredPeriodsValue,
 			"required_double_lessons":    requiredDoubles,
+			"scheduled_periods":          scheduledPeriods,
+			"remaining_periods":          remainingPeriods,
+			"demand_source":              demandSource,
+			"demand_status":              demandStatus,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1849,6 +1893,74 @@ func (h *Handler) TeachingDemands(w http.ResponseWriter, r *http.Request, sessio
 		"count":   len(demands),
 		"status":  "SYNCHRONIZED",
 	})
+}
+
+func (h *Handler) TeachingDemandDetail(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
+	if r.Method != http.MethodPatch {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	assignmentID, err := uuid.Parse(r.PathValue("assignmentId"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_teaching_assignment_uuid")
+		return
+	}
+	today, _ := time.Parse("2006-01-02", workspaceLocalDate(session.WorkspaceTimezone))
+	terms, err := h.academicTerms(r.Context(), session.WorkspaceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "teaching_demand_save_failed")
+		return
+	}
+	selected, err := selectTerm(terms, r.URL.Query().Get("term_uuid"), today, true)
+	if err != nil || selected == nil {
+		writeError(w, http.StatusBadRequest, "term_not_found")
+		return
+	}
+	var body struct {
+		RequiredPeriods *int `json:"required_periods_per_cycle"`
+		RequiredDoubles *int `json:"required_double_lessons"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RequiredPeriods == nil {
+		writeError(w, http.StatusBadRequest, "invalid_teaching_demand")
+		return
+	}
+	doubles := 0
+	if body.RequiredDoubles != nil {
+		doubles = *body.RequiredDoubles
+	}
+	if *body.RequiredPeriods <= 0 || doubles < 0 || doubles*2 > *body.RequiredPeriods {
+		writeError(w, http.StatusBadRequest, "invalid_teaching_demand")
+		return
+	}
+	var exists bool
+	if err := h.pool.QueryRow(r.Context(), `
+		SELECT EXISTS(
+		  SELECT 1
+		  FROM external_teaching_assignment assignment
+		  JOIN external_cohort cohort ON cohort.workspace_id = assignment.workspace_id AND cohort.id = assignment.cohort_uuid
+		  WHERE assignment.id = $1 AND assignment.workspace_id = $2
+		    AND assignment.status = 'ACTIVE'
+		    AND cohort.academic_year_uuid = $3
+		)`, assignmentID, session.WorkspaceID, selected.AcademicYearID).Scan(&exists); err != nil || !exists {
+		writeError(w, http.StatusNotFound, "teaching_assignment_not_found")
+		return
+	}
+	_, err = h.pool.Exec(r.Context(), `
+		INSERT INTO timetable_demand_override (
+		  id, workspace_id, academic_term_uuid, teaching_assignment_uuid,
+		  weekly_lesson_requirement, required_double_lessons
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (workspace_id, academic_term_uuid, teaching_assignment_uuid)
+		DO UPDATE SET weekly_lesson_requirement = EXCLUDED.weekly_lesson_requirement,
+		              required_double_lessons = EXCLUDED.required_double_lessons,
+		              updated_at = now()`,
+		uuid.New(), session.WorkspaceID, selected.ID, assignmentID, *body.RequiredPeriods, doubles)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "teaching_demand_save_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "UPDATED"})
 }
 
 func (h *Handler) Availability(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {

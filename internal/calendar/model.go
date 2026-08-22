@@ -15,6 +15,7 @@ const (
 	SlotTypeAssembly    SlotType = "ASSEMBLY"
 	SlotTypeNonTeaching SlotType = "NON_TEACHING"
 	SlotTypePrep        SlotType = "PREP"
+	SlotTypeTransition  SlotType = "TRANSITION"
 )
 
 // BreakWindow defines a single break period within a day.

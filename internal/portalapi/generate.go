@@ -13,6 +13,7 @@ import (
 	"scholaroscope-temporal-service/internal/scheduling"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type generatedSlot struct {
@@ -175,7 +176,9 @@ func (h *Handler) loadEngineProblem(ctx context.Context, workspaceID, versionID 
 	assignmentRows, err := h.pool.Query(ctx, `
 		SELECT assignment.id, assignment.teacher_uuid, assignment.cohort_uuid,
 		       assignment.cohort_subject_uuid, assignment.subject_uuid,
-		       assignment.scheduling_requirements
+		       assignment.scheduling_requirements,
+		       override.weekly_lesson_requirement,
+		       override.required_double_lessons
 		FROM external_teaching_assignment assignment
 		JOIN external_actor actor ON actor.id = assignment.teacher_uuid
 		 AND actor.workspace_id = assignment.workspace_id AND actor.status = 'ACTIVE'
@@ -185,8 +188,12 @@ func (h *Handler) loadEngineProblem(ctx context.Context, workspaceID, versionID 
 		 AND cohort.workspace_id = assignment.workspace_id AND cohort.status = 'ACTIVE'
 		JOIN external_cohort_subject cohort_subject ON cohort_subject.id = assignment.cohort_subject_uuid
 		 AND cohort_subject.workspace_id = assignment.workspace_id AND cohort_subject.status = 'ACTIVE'
+		LEFT JOIN timetable_demand_override override
+		  ON override.workspace_id = assignment.workspace_id
+		 AND override.academic_term_uuid = $3
+		 AND override.teaching_assignment_uuid = assignment.id
 		WHERE assignment.workspace_id = $1 AND assignment.status = 'ACTIVE'
-		  AND cohort.academic_year_uuid = $2`, workspaceID, academicYearID)
+		  AND cohort.academic_year_uuid = $2`, workspaceID, academicYearID, termID)
 	if err != nil {
 		return scheduling.EngineProblem{}, nil, uuid.Nil, err
 	}
@@ -194,13 +201,25 @@ func (h *Handler) loadEngineProblem(ctx context.Context, workspaceID, versionID 
 	for assignmentRows.Next() {
 		var assignmentID, teacherID, cohortID, cohortSubjectID, subjectID uuid.UUID
 		var requirementsJSON []byte
-		if err := assignmentRows.Scan(&assignmentID, &teacherID, &cohortID, &cohortSubjectID, &subjectID, &requirementsJSON); err != nil {
+		var overrideWeekly, overrideDoubles pgtype.Int4
+		if err := assignmentRows.Scan(&assignmentID, &teacherID, &cohortID, &cohortSubjectID, &subjectID, &requirementsJSON, &overrideWeekly, &overrideDoubles); err != nil {
 			return scheduling.EngineProblem{}, nil, uuid.Nil, err
 		}
 		requirements := map[string]any{}
 		_ = json.Unmarshal(requirementsJSON, &requirements)
-		weekly := intRequirement(requirements, "weekly_lesson_requirement", 1)
+		weekly, configured := intRequirementOptional(requirements, "weekly_lesson_requirement")
 		doubles := intRequirement(requirements, "required_double_lessons", 0)
+		if overrideWeekly.Valid {
+			weekly = int(overrideWeekly.Int32)
+			configured = true
+			doubles = 0
+			if overrideDoubles.Valid {
+				doubles = int(overrideDoubles.Int32)
+			}
+		}
+		if !configured {
+			return scheduling.EngineProblem{}, nil, uuid.Nil, errCode("teaching_demand_unconfigured")
+		}
 		teacherKey, cohortKey, subjectKey, cohortSubjectKey := teacherID.String(), cohortID.String(), subjectID.String(), cohortSubjectID.String()
 		teacher := problem.Teachers[teacherKey]
 		if teacher.ID == "" {
@@ -334,21 +353,28 @@ func (h *Handler) persistSolveResult(ctx context.Context, workspaceID, timetable
 }
 
 func intRequirement(requirements map[string]any, key string, fallback int) int {
+	if value, ok := intRequirementOptional(requirements, key); ok {
+		return value
+	}
+	return fallback
+}
+
+func intRequirementOptional(requirements map[string]any, key string) (int, bool) {
 	value, exists := requirements[key]
 	if !exists {
-		return fallback
+		return 0, false
 	}
 	switch typed := value.(type) {
 	case float64:
 		if typed >= 0 {
-			return int(typed)
+			return int(typed), true
 		}
 	case int:
 		if typed >= 0 {
-			return typed
+			return typed, true
 		}
 	}
-	return fallback
+	return 0, false
 }
 
 func nullableString(value string) any {

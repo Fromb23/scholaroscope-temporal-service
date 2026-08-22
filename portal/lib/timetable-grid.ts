@@ -49,7 +49,12 @@ export function unscheduledPeriods(demands: TeachingDemand[], entries: Timetable
     scheduledByAssignment.set(key, (scheduledByAssignment.get(key) ?? 0) + entry.duration_periods);
   }
   return demands.reduce((total, demand) => {
+    if (demand.required_periods_per_cycle == null) return total;
     const scheduled = scheduledByAssignment.get(`${demand.teacher_uuid}:${demand.cohort_subject_uuid}`) ?? 0;
     return total + Math.max(0, demand.required_periods_per_cycle - scheduled);
   }, 0);
+}
+
+export function unconfiguredDemandCount(demands: TeachingDemand[]): number {
+  return demands.filter((demand) => demand.required_periods_per_cycle == null || demand.demand_status === "UNCONFIGURED").length;
 }

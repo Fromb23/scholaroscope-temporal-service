@@ -67,11 +67,52 @@ func TestCalendarRejectsMalformedAndOverlappingBreaks(t *testing.T) {
 	}
 }
 
-func TestCalendarRejectsPartialTeachingPeriod(t *testing.T) {
+func TestCalendarRepresentsRemainderAsTransition(t *testing.T) {
 	version := &OrgCalendarVersion{ID: uuid.New(), OrgID: uuid.New(), LearningDays: []string{"MONDAY"}, DayStartTime: clock(t, "08:00"), DayEndTime: clock(t, "08:50"), SlotDurationMinutes: 40}
+	slots := generateTimeSlots(version)
+	if err := validateGeneratedLessonSlots(slots, 40); err != nil {
+		t.Fatal(err)
+	}
+	if len(slots) != 2 || slots[0].SlotType != SlotTypeLesson || slots[1].SlotType != SlotTypeTransition {
+		t.Fatalf("unexpected slots: %+v", slots)
+	}
+	if got := slots[0].EndTime.Sub(slots[0].StartTime); got != 40*time.Minute {
+		t.Fatalf("lesson duration = %s", got)
+	}
+	if got := slots[1].EndTime.Sub(slots[1].StartTime); got != 10*time.Minute {
+		t.Fatalf("transition duration = %s", got)
+	}
+}
+
+func TestCalendarPreservesFlexibleBreakBoundaries(t *testing.T) {
+	version := &OrgCalendarVersion{ID: uuid.New(), OrgID: uuid.New(), LearningDays: []string{"MONDAY"}, DayStartTime: clock(t, "08:00"), DayEndTime: clock(t, "16:00"), SlotDurationMinutes: 40, BreakStructure: []BreakWindow{{Label: "Morning break", StartTime: "11:10", EndTime: "11:50", Kind: "BREAK"}, {Label: "Lunch", StartTime: "13:10", EndTime: "13:40", Kind: "LUNCH"}}}
+	slots := generateTimeSlots(version)
+	if err := validateGeneratedLessonSlots(slots, 40); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]SlotType, 0, len(slots))
+	for _, slot := range slots {
+		got = append(got, slot.SlotType)
+		if slot.SlotType == SlotTypeLesson && slot.EndTime.Sub(slot.StartTime) != 40*time.Minute {
+			t.Fatalf("shortened lesson: %+v", slot)
+		}
+	}
+	want := []SlotType{SlotTypeLesson, SlotTypeLesson, SlotTypeLesson, SlotTypeLesson, SlotTypeTransition, SlotTypeBreak, SlotTypeLesson, SlotTypeLesson, SlotTypeLunch, SlotTypeLesson, SlotTypeLesson, SlotTypeLesson, SlotTypeTransition}
+	if len(got) != len(want) {
+		t.Fatalf("slot count=%d want=%d got=%v", len(got), len(want), got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("slot %d=%s want=%s all=%v", index, got[index], want[index], got)
+		}
+	}
+}
+
+func TestCalendarRejectsNoFullTeachingPeriod(t *testing.T) {
+	version := &OrgCalendarVersion{ID: uuid.New(), OrgID: uuid.New(), LearningDays: []string{"MONDAY"}, DayStartTime: clock(t, "08:00"), DayEndTime: clock(t, "08:30"), SlotDurationMinutes: 40}
 	err := validateGeneratedLessonSlots(generateTimeSlots(version), 40)
 	var validation *ValidationError
-	if !errors.As(err, &validation) || validation.Code != "PARTIAL_TEACHING_PERIOD" {
+	if !errors.As(err, &validation) || validation.Code != "NO_TEACHING_PERIODS" {
 		t.Fatalf("got %v", err)
 	}
 }
