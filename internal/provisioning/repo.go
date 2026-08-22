@@ -2,6 +2,7 @@ package provisioning
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -114,6 +115,24 @@ func (r *Repo) BootstrapWorkspace(ctx context.Context, payload BootstrapPayload)
 	if err := r.upsertAcademicSync(ctx, tx, workspaceID, payload.AcademicSync); err != nil {
 		return nil, err
 	}
+	snapshotJSON, err := json.Marshal(payload.AcademicSync)
+	if err != nil {
+		return nil, fmt.Errorf("provisioning repo: marshal academic snapshot: %w", err)
+	}
+	snapshotHash := fmt.Sprintf("%x", sha256.Sum256(snapshotJSON))
+	if _, err := tx.Exec(ctx, `
+		UPDATE external_workspace
+		SET academic_snapshot_hash = $1,
+		    source_assignment_count = $3,
+		    eligible_assignment_count = $4,
+		    last_successful_sync_at = now(),
+		    integration_health = 'HEALTHY',
+		    reconciliation_required = false,
+		    last_error = NULL,
+		    updated_at = now()
+		WHERE id = $2`, snapshotHash, workspaceID, payload.AcademicSync.AssignmentReadiness.SourceAssignmentCount, payload.AcademicSync.AssignmentReadiness.EligibleAssignmentCount); err != nil {
+		return nil, fmt.Errorf("provisioning repo: record academic snapshot: %w", err)
+	}
 
 	ackPayload, _ := json.Marshal(map[string]any{
 		"workspace_uuid":            workspaceID.String(),
@@ -169,6 +188,18 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 		SET status = 'DISABLED', updated_at = now()
 		WHERE workspace_id = $1`, workspaceID); err != nil {
 		return fmt.Errorf("provisioning repo: disable stale assignments: %w", err)
+	}
+	for _, statement := range []string{
+		"UPDATE external_academic_year SET is_current = false, status = 'ARCHIVED', updated_at = now() WHERE workspace_id = $1",
+		"UPDATE external_academic_term SET status = 'CLOSED_HISTORICAL', updated_at = now() WHERE workspace_id = $1",
+		"UPDATE external_calendar_event SET status = 'REMOVED', updated_at = now() WHERE workspace_id = $1",
+		"UPDATE external_cohort SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
+		"UPDATE external_subject SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
+		"UPDATE external_cohort_subject SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
+	} {
+		if _, err := tx.Exec(ctx, statement, workspaceID); err != nil {
+			return fmt.Errorf("provisioning repo: disable stale academic projection: %w", err)
+		}
 	}
 	for _, actor := range sync.Actors {
 		actorID, err := uuid.Parse(actor.ActorUUID)
@@ -394,16 +425,21 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 			}
 			academicYearID = &parsed
 		}
+		status := strings.ToUpper(strings.TrimSpace(cohort.Status))
+		if status == "" {
+			status = "ACTIVE"
+		}
 		_, err = tx.Exec(ctx, `
-			INSERT INTO external_cohort (id, workspace_id, scholaroscope_cohort_ref, name, level, stream, academic_year_ref, academic_year_uuid)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO external_cohort (id, workspace_id, scholaroscope_cohort_ref, name, level, stream, academic_year_ref, academic_year_uuid, enrollment_count, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (workspace_id, scholaroscope_cohort_ref)
 			DO UPDATE SET name = EXCLUDED.name, level = EXCLUDED.level, stream = EXCLUDED.stream,
 			              academic_year_ref = EXCLUDED.academic_year_ref,
 			              academic_year_uuid = EXCLUDED.academic_year_uuid,
-			              status = 'ACTIVE', updated_at = now()`,
+			              enrollment_count = EXCLUDED.enrollment_count,
+			              status = EXCLUDED.status, updated_at = now()`,
 			cohortID, workspaceID, cohort.CohortRef, cohort.Name, cohort.Level, cohort.Stream,
-			cohort.AcademicYearRef, academicYearID,
+			cohort.AcademicYearRef, academicYearID, cohort.EnrollmentCount, status,
 		)
 		if err != nil {
 			return fmt.Errorf("provisioning repo: upsert cohort: %w", err)

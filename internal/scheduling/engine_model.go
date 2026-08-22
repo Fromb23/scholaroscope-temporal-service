@@ -45,6 +45,17 @@ type EngineResource struct {
 	Unavailable map[string]bool `json:"unavailable,omitempty"`
 }
 
+type EngineCalendarException struct {
+	ID             string `json:"id"`
+	WorkspaceID    string `json:"workspace_id"`
+	AcademicYearID string `json:"academic_year_id"`
+	TermID         string `json:"term_id"`
+	Kind           string `json:"kind"`
+	StartsOn       string `json:"starts_on"`
+	EndsOn         string `json:"ends_on"`
+	BlocksLearning bool   `json:"blocks_learning"`
+}
+
 // EngineAssignment is the normalized curriculum-independent scheduling edge.
 // WeeklyPeriods counts occupied timetable cells; DoubleBlocks consumes two of
 // those periods per block.
@@ -65,17 +76,18 @@ type EngineAssignment struct {
 }
 
 type EngineProblem struct {
-	WorkspaceID    string                     `json:"workspace_id"`
-	AcademicYearID string                     `json:"academic_year_id"`
-	TermID         string                     `json:"term_id"`
-	Periods        []EnginePeriod             `json:"periods"`
-	Teachers       map[string]EngineTeacher   `json:"teachers"`
-	Cohorts        map[string]EngineCohort    `json:"cohorts"`
-	Resources      map[string]EngineResource  `json:"resources,omitempty"`
-	Assignments    []EngineAssignment         `json:"assignments"`
-	Registrations  map[string]map[string]bool `json:"registrations"`
-	FullCoverage   bool                       `json:"full_coverage"`
-	Existing       []EnginePlacement          `json:"existing,omitempty"`
+	WorkspaceID        string                     `json:"workspace_id"`
+	AcademicYearID     string                     `json:"academic_year_id"`
+	TermID             string                     `json:"term_id"`
+	Periods            []EnginePeriod             `json:"periods"`
+	Teachers           map[string]EngineTeacher   `json:"teachers"`
+	Cohorts            map[string]EngineCohort    `json:"cohorts"`
+	Resources          map[string]EngineResource  `json:"resources,omitempty"`
+	Assignments        []EngineAssignment         `json:"assignments"`
+	Registrations      map[string]map[string]bool `json:"registrations"`
+	FullCoverage       bool                       `json:"full_coverage"`
+	Existing           []EnginePlacement          `json:"existing,omitempty"`
+	CalendarExceptions []EngineCalendarException  `json:"calendar_exceptions,omitempty"`
 }
 
 type EnginePlacement struct {

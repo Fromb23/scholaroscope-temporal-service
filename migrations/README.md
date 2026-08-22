@@ -9,6 +9,7 @@ psql "$TEMPORAL_DATABASE_URL" -f migrations/000001_initial_external_timetable_sc
 psql "$TEMPORAL_DATABASE_URL" -f migrations/000002_workspace_reference_uniqueness.up.sql
 psql "$TEMPORAL_DATABASE_URL" -f migrations/000006_academic_years_actor_roles.up.sql
 psql "$TEMPORAL_DATABASE_URL" -f migrations/000007_solver_projection_integrity.up.sql
+psql "$TEMPORAL_DATABASE_URL" -f migrations/000008_grid_workflow_and_spaces.up.sql
 ```
 
 Rollback for local development:
@@ -35,6 +36,11 @@ Production deployment should:
 adds source-aware assignment requirements, solver diagnostics, and trigger-backed
 teacher/cohort/room/resource occupancy. Apply it before deploying an API binary
 that accepts generation requests.
+
+`000008` adds synchronized class enrolment/default-space projection fields,
+optional room kinds, one-running-generation enforcement, academic snapshot
+binding and assignment-readiness counts, and corrects the timetable calendar foreign key to
+`org_calendar_version`. Existing unhashed drafts require safe regeneration.
 
 Rollback is limited to explicit `*.down.sql` files and should not be used after
 publication data exists without a data-retention plan.

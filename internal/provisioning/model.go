@@ -23,6 +23,12 @@ type AcademicSyncPayload struct {
 	Subjects            []SubjectProjection            `json:"subjects"`
 	CohortSubjects      []CohortSubjectProjection      `json:"cohort_subjects"`
 	TeachingAssignments []TeachingAssignmentProjection `json:"teaching_assignments"`
+	AssignmentReadiness AssignmentReadinessProjection  `json:"assignment_readiness"`
+}
+
+type AssignmentReadinessProjection struct {
+	SourceAssignmentCount   int `json:"source_assignment_count"`
+	EligibleAssignmentCount int `json:"eligible_assignment_count"`
 }
 
 type AcademicYearProjection struct {
@@ -84,6 +90,8 @@ type CohortProjection struct {
 	Stream           string `json:"stream"`
 	AcademicYearRef  string `json:"academic_year_ref"`
 	AcademicYearUUID string `json:"academic_year_uuid"`
+	EnrollmentCount  int    `json:"enrollment_count"`
+	Status           string `json:"status"`
 }
 
 type SubjectProjection struct {

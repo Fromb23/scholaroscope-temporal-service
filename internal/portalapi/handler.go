@@ -28,8 +28,26 @@ func (h *Handler) ValidateVersion(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusBadRequest, "invalid_version_uuid")
 		return
 	}
+	if !h.academicSnapshotIsCurrent(r.Context(), session.WorkspaceID, versionID) {
+		writeError(w, http.StatusConflict, "academic_data_stale")
+		return
+	}
+	if !h.versionTermIsSchedulable(r.Context(), session.WorkspaceID, versionID, session.WorkspaceTimezone) {
+		writeError(w, http.StatusConflict, "term_not_schedulable")
+		return
+	}
 	if err := h.rebuildConflictsForVersion(r.Context(), session.WorkspaceID, versionID); err != nil {
 		writeError(w, http.StatusInternalServerError, "validation_failed")
+		return
+	}
+	var solveStatus string
+	var unscheduled, solverHard int
+	if err := h.pool.QueryRow(r.Context(), `
+		SELECT status, unscheduled_mandatory_lessons, hard_conflicts
+		FROM solver_run
+		WHERE workspace_id = $1 AND timetable_version_id = $2
+		ORDER BY created_at DESC LIMIT 1`, session.WorkspaceID, versionID).Scan(&solveStatus, &unscheduled, &solverHard); err != nil {
+		writeError(w, http.StatusConflict, "draft_regeneration_required")
 		return
 	}
 	summary, err := h.conflictSummaryForVersion(r.Context(), session.WorkspaceID, versionID)
@@ -38,13 +56,25 @@ func (h *Handler) ValidateVersion(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	status := "VALIDATED"
-	if summary.HardConflicts > 0 {
+	if summary.HardConflicts > 0 || solverHard > 0 || unscheduled > 0 || (solveStatus != "COMPLETE" && solveStatus != "COMPLETE_WITH_SOFT_VIOLATIONS") {
 		status = "BLOCKED"
 	}
+	versionStatus := "VALIDATED"
+	if status == "BLOCKED" {
+		versionStatus = "DRAFT"
+	}
+	hardConflicts := max(summary.HardConflicts, solverHard)
+	validationSummary := mustJSON(map[string]any{"status": status, "hard_conflicts": hardConflicts, "soft_conflicts": summary.SoftConflicts, "unscheduled_mandatory_lessons": unscheduled})
+	if _, err := h.pool.Exec(r.Context(), `UPDATE timetable_version SET status = $1, validation_summary = $2::jsonb, updated_at = now() WHERE id = $3 AND workspace_id = $4 AND status NOT IN ('PUBLISHED', 'SUPERSEDED', 'ARCHIVED')`, versionStatus, validationSummary, versionID, session.WorkspaceID); err != nil {
+		writeError(w, http.StatusInternalServerError, "validation_failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":         status,
-		"hard_conflicts": summary.HardConflicts,
-		"soft_conflicts": summary.SoftConflicts,
+		"status":                        status,
+		"hard_conflicts":                hardConflicts,
+		"soft_conflicts":                summary.SoftConflicts,
+		"unscheduled_mandatory_lessons": unscheduled,
+		"can_publish":                   status == "VALIDATED",
 	})
 }
 
@@ -70,6 +100,54 @@ func (h *Handler) PublishVersion(w http.ResponseWriter, r *http.Request, session
 type conflictSummary struct {
 	HardConflicts int `json:"hard_conflicts"`
 	SoftConflicts int `json:"soft_conflicts"`
+}
+
+func publicationBlocker(versionStatus, solveStatus string, unscheduled, solverHardConflicts, detectedHardConflicts int) string {
+	if versionStatus != "VALIDATED" {
+		return "complete_solver_validation_required"
+	}
+	if (solveStatus != "COMPLETE" && solveStatus != "COMPLETE_WITH_SOFT_VIOLATIONS") || unscheduled > 0 || solverHardConflicts > 0 {
+		return "incomplete_or_conflicting_schedule"
+	}
+	if detectedHardConflicts > 0 {
+		return "hard_conflicts_block_publication"
+	}
+	return ""
+}
+
+func (h *Handler) academicSnapshotIsCurrent(ctx context.Context, workspaceID, versionID uuid.UUID) bool {
+	var current bool
+	err := h.pool.QueryRow(ctx, `
+		SELECT workspace.academic_snapshot_hash IS NOT NULL
+		   AND version.academic_snapshot_hash = workspace.academic_snapshot_hash
+		FROM timetable_version version
+		JOIN external_workspace workspace ON workspace.id = version.workspace_id
+		WHERE version.id = $1 AND version.workspace_id = $2`, versionID, workspaceID).Scan(&current)
+	return err == nil && current
+}
+
+func (h *Handler) versionTermIsSchedulable(ctx context.Context, workspaceID, versionID uuid.UUID, timezone string) bool {
+	var term academicTerm
+	err := h.pool.QueryRow(ctx, `
+		SELECT term.id, term.academic_year_uuid, term.scholaroscope_academic_year_ref,
+		       term.name, term.academic_year_label, term.start_date, term.end_date,
+		       term.status, term.calendar_ready, term.is_frozen
+		FROM timetable_version version
+		JOIN timetable timetable ON timetable.id = version.timetable_id AND timetable.workspace_id = version.workspace_id
+		JOIN external_academic_term term ON term.id = timetable.academic_term_uuid AND term.workspace_id = version.workspace_id
+		WHERE version.id = $1 AND version.workspace_id = $2`, versionID, workspaceID).Scan(
+		&term.ID, &term.AcademicYearID, &term.AcademicYearRef, &term.Name, &term.AcademicYearLabel,
+		&term.StartDate, &term.EndDate, &term.Status, &term.CalendarReady, &term.Frozen,
+	)
+	if err != nil {
+		return false
+	}
+	today, parseErr := time.Parse("2006-01-02", workspaceLocalDate(timezone))
+	if parseErr != nil {
+		return false
+	}
+	lifecycle := termLifecycle(term, today)
+	return lifecycle == "ACTIVE" || lifecycle == "UPCOMING"
 }
 
 func (h *Handler) conflictSummaryForVersion(ctx context.Context, workspaceID, versionID uuid.UUID) (*conflictSummary, error) {
@@ -104,6 +182,19 @@ func (h *Handler) conflictSummaryForVersion(ctx context.Context, workspaceID, ve
 }
 
 func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSession, versionID uuid.UUID, reason string) (map[string]any, error) {
+	if !h.academicSnapshotIsCurrent(ctx, session.WorkspaceID, versionID) {
+		return nil, errCode("academic_data_stale")
+	}
+	if !h.versionTermIsSchedulable(ctx, session.WorkspaceID, versionID, session.WorkspaceTimezone) {
+		return nil, errCode("term_not_schedulable")
+	}
+	var persistedStatus string
+	if err := h.pool.QueryRow(ctx, `SELECT status FROM timetable_version WHERE id = $1 AND workspace_id = $2`, versionID, session.WorkspaceID).Scan(&persistedStatus); err != nil {
+		return nil, errCode("version_not_publishable")
+	}
+	if persistedStatus != "VALIDATED" {
+		return nil, errCode("complete_solver_validation_required")
+	}
 	var solveStatus string
 	var unscheduled, solverHardConflicts int
 	if err := h.pool.QueryRow(ctx, `
@@ -114,9 +205,6 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 	).Scan(&solveStatus, &unscheduled, &solverHardConflicts); err != nil {
 		return nil, errCode("complete_solver_validation_required")
 	}
-	if (solveStatus != "COMPLETE" && solveStatus != "COMPLETE_WITH_SOFT_VIOLATIONS") || unscheduled != 0 || solverHardConflicts != 0 {
-		return nil, errCode("incomplete_or_conflicting_schedule")
-	}
 	if err := h.rebuildConflictsForVersion(ctx, session.WorkspaceID, versionID); err != nil {
 		return nil, err
 	}
@@ -124,8 +212,8 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 	if err != nil {
 		return nil, err
 	}
-	if summary.HardConflicts > 0 {
-		return nil, errCode("hard_conflicts_block_publication")
+	if blocker := publicationBlocker(persistedStatus, solveStatus, unscheduled, solverHardConflicts, summary.HardConflicts); blocker != "" {
+		return nil, errCode(blocker)
 	}
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
@@ -157,7 +245,7 @@ func (h *Handler) publishVersion(ctx context.Context, session *launch.PortalSess
 		LEFT JOIN external_academic_term term ON term.id = t.academic_term_uuid AND term.workspace_id = tv.workspace_id
 		WHERE tv.id = $1
 		  AND tv.workspace_id = $2
-		  AND tv.status IN ('DRAFT', 'VALIDATED', 'PUBLISHED')`,
+		  AND tv.status = 'VALIDATED'`,
 		versionID,
 		session.WorkspaceID,
 	).Scan(&timetableID, &versionNumber, &effectiveStart, &effectiveEnd, &previousVersionID, &termName, &academicYearLabel, &scholaroscopeTermRef)
@@ -295,7 +383,14 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 		       te.day_of_week, te.start_time::text, te.end_time::text,
 		       te.duration_periods, te.start_period_index,
 		       COALESCE(eta.teacher_ref, ''), COALESCE(eta.cohort_ref, ''),
-		       COALESCE(eta.subject_ref, ''), COALESCE(eta.cohort_subject_ref, '')
+		       COALESCE(eta.subject_ref, ''), COALESCE(eta.cohort_subject_ref, ''),
+		       EXISTS(
+		         SELECT 1 FROM scheduling_conflict conflict
+		         WHERE conflict.org_id = te.workspace_id
+		           AND conflict.timetable_version_id = te.timetable_version_id
+		           AND conflict.timetable_entry_id = te.id
+		           AND conflict.resolved = false AND conflict.severity = 'HARD'
+		       ) AS has_hard_conflict
 		FROM timetable_entry te
 		LEFT JOIN external_actor a ON a.workspace_id = te.workspace_id AND a.id = te.teacher_uuid
 		LEFT JOIN external_cohort c ON c.workspace_id = te.workspace_id AND c.id = te.cohort_uuid
@@ -324,6 +419,7 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 		var day, duration, startPeriod int
 		var startTime, endTime string
 		var teacherRef, cohortRef, subjectRef, cohortSubjectRef string
+		var hasHardConflict bool
 		if err := rows.Scan(
 			&entryID, &stableID, &teacherID, &teacherName,
 			&cohortID, &cohortName,
@@ -332,6 +428,7 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 			&day, &startTime, &endTime,
 			&duration, &startPeriod,
 			&teacherRef, &cohortRef, &subjectRef, &cohortSubjectRef,
+			&hasHardConflict,
 		); err != nil {
 			return nil, err
 		}
@@ -362,6 +459,7 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 			"duration_minutes":    durationMinutes(startTime, endTime),
 			"duration_periods":    duration,
 			"start_period_index":  startPeriod,
+			"has_hard_conflict":   hasHardConflict,
 		})
 	}
 	return entries, rows.Err()
@@ -643,7 +741,8 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 	}
 	var activeCalendarCount int
 	_ = h.pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM org_calendar_version WHERE org_id = $1 AND is_active = true`, session.WorkspaceID).Scan(&activeCalendarCount)
-	readinessStatus := "READY_TO_CONFIGURE_TIMETABLE"
+	readinessStatus := "READY"
+	readinessMessage := "Academic data is ready for timetable setup."
 	readinessChecks := []map[string]any{
 		{"code": "PLUGIN_INSTALLED", "ok": workspace.Status == "ACTIVE"},
 		{"code": "WORKSPACE_PROVISIONED", "ok": workspace.ProvisioningState == "READY"},
@@ -658,7 +757,19 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 	}
 	for _, check := range readinessChecks {
 		if ok, _ := check["ok"].(bool); !ok {
-			readinessStatus = fmt.Sprintf("MISSING_%s", check["code"])
+			readinessStatus = "SETUP_REQUIRED"
+			switch check["code"] {
+			case "ACADEMIC_YEAR_SYNCHRONIZED":
+				readinessMessage = "This workspace does not have an active academic year. Set one up in Scholaroscope to continue."
+			case "SCHEDULABLE_TERM_SYNCHRONIZED":
+				readinessMessage = "No active term is available for this workspace. Create or activate a term in Scholaroscope."
+			case "TEACHING_ASSIGNMENTS_SYNCHRONIZED", "ELIGIBLE_TEACHERS_AVAILABLE":
+				readinessMessage = "No teachers are assigned to class subjects yet. Complete teacher assignments in Scholaroscope."
+			case "BELL_PERIODS_CONFIGURED":
+				readinessMessage = "Your school day has not been configured. Add teaching periods and breaks to generate a timetable."
+			default:
+				readinessMessage = "Timetable setup still needs academic information from Scholaroscope."
+			}
 			break
 		}
 	}
@@ -681,8 +792,9 @@ func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request, session *lau
 		"schedulable_term":      schedulableTerm,
 		"counts":                counts,
 		"readiness": map[string]any{
-			"status": readinessStatus,
-			"checks": readinessChecks,
+			"status":  readinessStatus,
+			"message": readinessMessage,
+			"checks":  readinessChecks,
 		},
 	})
 }
@@ -745,9 +857,10 @@ func (h *Handler) PutCalendar(w http.ResponseWriter, r *http.Request, session *l
 	if err != nil {
 		var validation *calendar.ValidationError
 		if errors.As(err, &validation) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{
-				"code": validation.Code, "message": validation.Message,
-				"field_errors": map[string][]string{validation.Field: {validation.Message}},
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": domainError{
+				Type: "validation", Code: "invalid_school_day", Message: validation.Message,
+				Details: map[string]any{"field_errors": map[string][]string{validation.Field: {validation.Message}}},
+				Action:  &errorAction{"Review school day", "/school-day"},
 			}})
 			return
 		}
@@ -762,48 +875,87 @@ func (h *Handler) PutCalendar(w http.ResponseWriter, r *http.Request, session *l
 }
 
 func (h *Handler) CalendarExceptions(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
-	rows, err := h.pool.Query(r.Context(), `
-		SELECT id, starts_on::text, ends_on::text, event_kind, title,
-		       affects_learning, term_uuid, source
-		FROM external_calendar_event
-		WHERE workspace_id = $1
-		  AND status = 'ACTIVE'
-		ORDER BY starts_on, event_kind`,
-		session.WorkspaceID,
-	)
+	today, _ := time.Parse("2006-01-02", workspaceLocalDate(session.WorkspaceTimezone))
+	terms, err := h.academicTerms(r.Context(), session.WorkspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "calendar_exceptions_query_failed")
 		return
 	}
-	defer rows.Close()
-	exceptions := []map[string]any{}
-	for rows.Next() {
-		var id uuid.UUID
-		var startsOn, endsOn, kind, label, source string
-		var affectsLearning bool
-		var termID *uuid.UUID
-		if err := rows.Scan(&id, &startsOn, &endsOn, &kind, &label, &affectsLearning, &termID, &source); err != nil {
-			writeError(w, http.StatusInternalServerError, "calendar_exceptions_scan_failed")
+	selected, err := selectTerm(terms, r.URL.Query().Get("term_uuid"), today, true)
+	if err != nil || selected == nil || selected.AcademicYearID == nil {
+		code := "active_term_not_found"
+		if err != nil {
+			code = err.Error()
+		}
+		writeError(w, http.StatusBadRequest, code)
+		return
+	}
+	effectiveStart, effectiveEnd := selected.StartDate, selected.EndDate
+	if versionValue := strings.TrimSpace(r.URL.Query().Get("version_uuid")); versionValue != "" {
+		versionID, parseErr := uuid.Parse(versionValue)
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_version_uuid")
 			return
 		}
+		var boundTerm uuid.UUID
+		var boundYear *uuid.UUID
+		if queryErr := h.pool.QueryRow(r.Context(), `
+			SELECT t.academic_term_uuid, term.academic_year_uuid, tv.effective_start, tv.effective_end
+			FROM timetable_version tv
+			JOIN timetable t ON t.id = tv.timetable_id AND t.workspace_id = tv.workspace_id
+			JOIN external_academic_term term ON term.id = t.academic_term_uuid AND term.workspace_id = tv.workspace_id
+			WHERE tv.id = $1 AND tv.workspace_id = $2`, versionID, session.WorkspaceID).Scan(&boundTerm, &boundYear, &effectiveStart, &effectiveEnd); queryErr != nil || boundYear == nil {
+			writeError(w, http.StatusNotFound, "version_not_found")
+			return
+		}
+		if boundTerm != selected.ID {
+			writeDomainError(w, http.StatusConflict, "term_not_schedulable", map[string]any{"reason": "selected_term_does_not_match_draft"})
+			return
+		}
+	}
+	rows, err := h.applicableCalendarExceptions(r.Context(), session.WorkspaceID, *selected.AcademicYearID, selected.ID, effectiveStart, effectiveEnd)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "calendar_exceptions_query_failed")
+		return
+	}
+	exceptions := []map[string]any{}
+	for _, item := range rows {
 		exceptions = append(exceptions, map[string]any{
-			"exception_uuid":     id.String(),
-			"date":               startsOn,
-			"end_date":           endsOn,
-			"kind":               kind,
-			"title":              label,
-			"blocks_learning":    affectsLearning,
-			"academic_term_uuid": uuidString(termID),
-			"source":             source,
+			"exception_uuid":     item.ID.String(),
+			"date":               item.StartDate.Format("2006-01-02"),
+			"end_date":           item.EndDate.Format("2006-01-02"),
+			"kind":               item.Kind,
+			"title":              item.Title,
+			"blocks_learning":    item.AffectsLearning,
+			"academic_term_uuid": selected.ID.String(),
+			"source":             item.Source,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"exceptions": exceptions,
-		"count":      len(exceptions),
+		"exceptions":       exceptions,
+		"count":            len(exceptions),
+		"academic_context": termPayload(*selected, today),
+		"effective_start":  effectiveStart.Format("2006-01-02"),
+		"effective_end":    effectiveEnd.Format("2006-01-02"),
 	})
 }
 
 func (h *Handler) Teachers(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
+	today, _ := time.Parse("2006-01-02", workspaceLocalDate(session.WorkspaceTimezone))
+	terms, err := h.academicTerms(r.Context(), session.WorkspaceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "teachers_query_failed")
+		return
+	}
+	selected, err := selectTerm(terms, r.URL.Query().Get("term_uuid"), today, true)
+	if err != nil || selected == nil || selected.AcademicYearID == nil {
+		code := "active_term_not_found"
+		if err != nil {
+			code = err.Error()
+		}
+		writeError(w, http.StatusBadRequest, code)
+		return
+	}
 	rows, err := h.pool.Query(r.Context(), `
 		SELECT a.id, a.scholaroscope_user_ref, a.display_name, a.status,
 		       jsonb_agg(DISTINCT jsonb_build_object(
@@ -819,11 +971,16 @@ func (h *Handler) Teachers(w http.ResponseWriter, r *http.Request, session *laun
 		  ON eta.workspace_id = a.workspace_id
 		 AND eta.teacher_uuid = a.id
 		 AND eta.status = 'ACTIVE'
+		JOIN external_cohort cohort
+		  ON cohort.id = eta.cohort_uuid
+		 AND cohort.workspace_id = eta.workspace_id
+		 AND cohort.status = 'ACTIVE'
 		WHERE a.workspace_id = $1
 		  AND a.status = 'ACTIVE'
+		  AND cohort.academic_year_uuid = $2
 		GROUP BY a.id, a.scholaroscope_user_ref, a.display_name, a.status
 		ORDER BY a.display_name`,
-		session.WorkspaceID,
+		session.WorkspaceID, selected.AcademicYearID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "teachers_query_failed")
@@ -859,28 +1016,33 @@ func (h *Handler) Rooms(w http.ResponseWriter, r *http.Request, session *launch.
 		h.createRoom(w, r, session)
 		return
 	}
-	rows, err := h.pool.Query(r.Context(), `
-		SELECT id, external_ref, name, capacity, exclusive, status
-		FROM room
-		WHERE workspace_id = $1
-		ORDER BY name`,
-		session.WorkspaceID,
-	)
+	rooms, err := h.listRooms(r.Context(), session.WorkspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "rooms_query_failed")
 		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rooms": rooms, "spaces": rooms, "count": len(rooms)})
+}
+
+func (h *Handler) listRooms(ctx context.Context, workspaceID uuid.UUID) ([]map[string]any, error) {
+	rows, err := h.pool.Query(ctx, `
+		SELECT id, external_ref, name, capacity, exclusive, status, room_kind
+		FROM room
+		WHERE workspace_id = $1
+		ORDER BY name`, workspaceID)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	rooms := []map[string]any{}
 	for rows.Next() {
 		var id uuid.UUID
 		var externalRef *string
-		var name, status string
+		var name, status, roomKind string
 		var capacity *int
 		var exclusive bool
-		if err := rows.Scan(&id, &externalRef, &name, &capacity, &exclusive, &status); err != nil {
-			writeError(w, http.StatusInternalServerError, "rooms_scan_failed")
-			return
+		if err := rows.Scan(&id, &externalRef, &name, &capacity, &exclusive, &status, &roomKind); err != nil {
+			return nil, err
 		}
 		rooms = append(rooms, map[string]any{
 			"room_uuid":    id,
@@ -889,36 +1051,137 @@ func (h *Handler) Rooms(w http.ResponseWriter, r *http.Request, session *launch.
 			"capacity":     capacity,
 			"exclusive":    exclusive,
 			"status":       status,
+			"kind":         roomKind,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rooms": rooms, "count": len(rooms)})
+	return rooms, rows.Err()
 }
 
 func (h *Handler) createRoom(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
 	var body struct {
-		Name     string `json:"name"`
-		Capacity *int   `json:"capacity"`
+		Name      string `json:"name"`
+		Capacity  *int   `json:"capacity"`
+		Kind      string `json:"kind"`
+		Exclusive *bool  `json:"exclusive"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_room")
 		return
 	}
 	id := uuid.New()
+	kind := strings.ToUpper(strings.TrimSpace(body.Kind))
+	if kind == "" {
+		kind = "GENERAL"
+	}
+	if kind != "GENERAL" && kind != "SPECIALIZED" && kind != "SHARED" {
+		writeError(w, http.StatusBadRequest, "invalid_room_kind")
+		return
+	}
+	exclusive := true
+	if body.Exclusive != nil {
+		exclusive = *body.Exclusive
+	}
 	_, err := h.pool.Exec(r.Context(), `
-		INSERT INTO room (id, workspace_id, name, capacity)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO room (id, workspace_id, name, capacity, room_kind, exclusive)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (workspace_id, name)
-		DO UPDATE SET capacity = EXCLUDED.capacity, updated_at = now()`,
+		DO UPDATE SET capacity = EXCLUDED.capacity, room_kind = EXCLUDED.room_kind,
+		              exclusive = EXCLUDED.exclusive, status = 'ACTIVE', updated_at = now()`,
 		id,
 		session.WorkspaceID,
-		body.Name,
+		strings.TrimSpace(body.Name),
 		body.Capacity,
+		kind,
+		exclusive,
 	)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "room_save_failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "saved"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "SAVED"})
+}
+
+func (h *Handler) RoomDetail(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
+	roomID, err := uuid.Parse(r.PathValue("roomId"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_room_uuid")
+		return
+	}
+	if r.Method == http.MethodDelete {
+		tx, beginErr := h.pool.Begin(r.Context())
+		if beginErr != nil {
+			writeError(w, http.StatusInternalServerError, "room_delete_failed")
+			return
+		}
+		defer tx.Rollback(r.Context())
+		var references int
+		_ = tx.QueryRow(r.Context(), `SELECT COUNT(*) FROM timetable_entry WHERE workspace_id = $1 AND room_id = $2`, session.WorkspaceID, roomID).Scan(&references)
+		if references > 0 {
+			writeError(w, http.StatusConflict, "room_in_use")
+			return
+		}
+		if _, err := tx.Exec(r.Context(), `UPDATE external_cohort SET default_room_id = NULL, updated_at = now() WHERE workspace_id = $1 AND default_room_id = $2`, session.WorkspaceID, roomID); err != nil {
+			writeError(w, http.StatusInternalServerError, "room_delete_failed")
+			return
+		}
+		tag, err := tx.Exec(r.Context(), `DELETE FROM room WHERE id = $1 AND workspace_id = $2`, roomID, session.WorkspaceID)
+		if err != nil || tag.RowsAffected() != 1 {
+			writeError(w, http.StatusNotFound, "room_not_found")
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "room_delete_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "DELETED"})
+		return
+	}
+	var body struct {
+		Name      string `json:"name"`
+		Capacity  *int   `json:"capacity"`
+		Kind      string `json:"kind"`
+		Exclusive *bool  `json:"exclusive"`
+		Status    string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_room")
+		return
+	}
+	var currentName, currentKind, currentStatus string
+	var currentCapacity *int
+	var currentExclusive bool
+	if err := h.pool.QueryRow(r.Context(), `SELECT name, capacity, room_kind, exclusive, status FROM room WHERE id = $1 AND workspace_id = $2`, roomID, session.WorkspaceID).Scan(&currentName, &currentCapacity, &currentKind, &currentExclusive, &currentStatus); err != nil {
+		writeError(w, http.StatusNotFound, "room_not_found")
+		return
+	}
+	if strings.TrimSpace(body.Name) != "" {
+		currentName = strings.TrimSpace(body.Name)
+	}
+	if body.Capacity != nil {
+		currentCapacity = body.Capacity
+	}
+	if strings.TrimSpace(body.Kind) != "" {
+		currentKind = strings.ToUpper(strings.TrimSpace(body.Kind))
+	}
+	if body.Exclusive != nil {
+		currentExclusive = *body.Exclusive
+	}
+	if strings.TrimSpace(body.Status) != "" {
+		currentStatus = strings.ToUpper(strings.TrimSpace(body.Status))
+	}
+	if (currentKind != "GENERAL" && currentKind != "SPECIALIZED" && currentKind != "SHARED") || (currentStatus != "ACTIVE" && currentStatus != "DISABLED") {
+		writeError(w, http.StatusBadRequest, "invalid_room")
+		return
+	}
+	_, err = h.pool.Exec(r.Context(), `UPDATE room SET name = $1, capacity = $2, room_kind = $3, exclusive = $4, status = $5, updated_at = now() WHERE id = $6 AND workspace_id = $7`, currentName, currentCapacity, currentKind, currentExclusive, currentStatus, roomID, session.WorkspaceID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "room_save_failed")
+		return
+	}
+	if currentStatus == "DISABLED" {
+		_, _ = h.pool.Exec(r.Context(), `UPDATE external_cohort SET default_room_id = NULL, updated_at = now() WHERE workspace_id = $1 AND default_room_id = $2`, session.WorkspaceID, roomID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "UPDATED"})
 }
 
 func (h *Handler) Timetables(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
@@ -927,9 +1190,12 @@ func (h *Handler) Timetables(w http.ResponseWriter, r *http.Request, session *la
 		return
 	}
 	rows, err := h.pool.Query(r.Context(), `
-		SELECT t.id, t.name, t.timetable_type, tv.id, tv.version_number, tv.status,
+		SELECT t.id, t.name, t.timetable_type, t.academic_term_uuid,
+		       COALESCE(term.name, ''), COALESCE(term.academic_year_label, ''),
+		       tv.id, tv.version_number, tv.status,
 		       tv.effective_start, tv.effective_end, tv.published_at
 		FROM timetable t
+		LEFT JOIN external_academic_term term ON term.id = t.academic_term_uuid AND term.workspace_id = t.workspace_id
 		LEFT JOIN timetable_version tv ON tv.timetable_id = t.id
 		WHERE t.workspace_id = $1
 		ORDER BY t.created_at DESC, tv.version_number DESC`,
@@ -943,26 +1209,30 @@ func (h *Handler) Timetables(w http.ResponseWriter, r *http.Request, session *la
 	items := []map[string]any{}
 	for rows.Next() {
 		var timetableID uuid.UUID
-		var name, timetableType string
+		var name, timetableType, termName, academicYearLabel string
+		var termID *uuid.UUID
 		var versionID *uuid.UUID
 		var versionNumber *int
 		var versionStatus *string
 		var effectiveStart, effectiveEnd *time.Time
 		var publishedAt *time.Time
-		if err := rows.Scan(&timetableID, &name, &timetableType, &versionID, &versionNumber, &versionStatus, &effectiveStart, &effectiveEnd, &publishedAt); err != nil {
+		if err := rows.Scan(&timetableID, &name, &timetableType, &termID, &termName, &academicYearLabel, &versionID, &versionNumber, &versionStatus, &effectiveStart, &effectiveEnd, &publishedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "timetables_scan_failed")
 			return
 		}
 		items = append(items, map[string]any{
-			"timetable_uuid":  timetableID,
-			"name":            name,
-			"type":            timetableType,
-			"version_uuid":    versionID,
-			"version_number":  versionNumber,
-			"status":          versionStatus,
-			"effective_start": effectiveStart,
-			"effective_end":   effectiveEnd,
-			"published_at":    publishedAt,
+			"timetable_uuid":      timetableID,
+			"name":                name,
+			"type":                timetableType,
+			"term_uuid":           termID,
+			"term_name":           termName,
+			"academic_year_label": academicYearLabel,
+			"version_uuid":        versionID,
+			"version_number":      versionNumber,
+			"status":              versionStatus,
+			"effective_start":     effectiveStart,
+			"effective_end":       effectiveEnd,
+			"published_at":        publishedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"timetables": items, "count": len(items)})
@@ -1015,11 +1285,14 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 		}
 		termID = &parsed
 		err = h.pool.QueryRow(r.Context(), `
-			SELECT name, academic_year_label, start_date, end_date
-			FROM external_academic_term
-			WHERE id = $1
-			  AND workspace_id = $2
-			  AND status IN ('OPEN', 'ACTIVE', 'READY')`,
+			SELECT term.name, term.academic_year_label, term.start_date, term.end_date
+			FROM external_academic_term term
+			JOIN external_academic_year year ON year.id = term.academic_year_uuid AND year.workspace_id = term.workspace_id
+			WHERE term.id = $1
+			  AND term.workspace_id = $2
+			  AND term.status = 'OPEN'
+			  AND term.is_frozen = false
+			  AND year.is_current = true`,
 			*termID,
 			session.WorkspaceID,
 		).Scan(&termName, &academicYearLabel, &termStart, &termEnd)
@@ -1029,16 +1302,20 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 		}
 	} else {
 		var activeTermID uuid.UUID
+		localToday := workspaceLocalDate(session.WorkspaceTimezone)
 		err = h.pool.QueryRow(r.Context(), `
-			SELECT id, name, academic_year_label, start_date, end_date
-			FROM external_academic_term
-			WHERE workspace_id = $1
-			  AND status IN ('OPEN', 'ACTIVE', 'READY')
-			  AND start_date <= CURRENT_DATE
-			  AND end_date >= CURRENT_DATE
-			ORDER BY start_date DESC
+			SELECT term.id, term.name, term.academic_year_label, term.start_date, term.end_date
+			FROM external_academic_term term
+			JOIN external_academic_year year ON year.id = term.academic_year_uuid AND year.workspace_id = term.workspace_id
+			WHERE term.workspace_id = $1
+			  AND term.status = 'OPEN' AND term.is_frozen = false
+			  AND year.is_current = true
+			  AND term.start_date <= $2::date
+			  AND term.end_date >= $2::date
+			ORDER BY term.start_date DESC
 			LIMIT 1`,
 			session.WorkspaceID,
+			localToday,
 		).Scan(&activeTermID, &termName, &academicYearLabel, &termStart, &termEnd)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "active_term_not_found")
@@ -1099,8 +1376,9 @@ func (h *Handler) createTimetable(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	_, err = tx.Exec(r.Context(), `
-		INSERT INTO timetable_version (id, workspace_id, timetable_id, version_number, status, effective_start, effective_end)
-		VALUES ($1, $2, $3, 1, 'DRAFT', $4, $5)`,
+		INSERT INTO timetable_version (id, workspace_id, timetable_id, version_number, status, effective_start, effective_end, academic_snapshot_hash)
+		SELECT $1, $2, $3, 1, 'DRAFT', $4, $5, academic_snapshot_hash
+		FROM external_workspace WHERE id = $2`,
 		versionID, session.WorkspaceID, timetableID, start, end,
 	)
 	if err != nil {
@@ -1150,20 +1428,49 @@ func (h *Handler) CreateVersion(w http.ResponseWriter, r *http.Request, session 
 	}
 	versionID := uuid.New()
 	var versionNumber int
-	err = h.pool.QueryRow(r.Context(), `
-		INSERT INTO timetable_version (id, workspace_id, timetable_id, version_number, status, derived_from_version_id, effective_start, effective_end)
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "version_create_failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var derivedFrom *uuid.UUID
+	err = tx.QueryRow(r.Context(), `
+		INSERT INTO timetable_version (id, workspace_id, timetable_id, version_number, status, derived_from_version_id, effective_start, effective_end, academic_snapshot_hash)
 		SELECT $1, workspace_id, id,
 		       COALESCE((SELECT MAX(version_number) + 1 FROM timetable_version WHERE workspace_id = t.workspace_id AND timetable_id = t.id), 1),
 		       'DRAFT',
 		       (SELECT id FROM timetable_version WHERE workspace_id = t.workspace_id AND timetable_id = t.id ORDER BY version_number DESC LIMIT 1),
-		       effective_start, effective_end
+		       effective_start, effective_end,
+		       (SELECT academic_snapshot_hash FROM external_workspace WHERE id = t.workspace_id)
 		FROM timetable t
 		WHERE t.id = $2 AND t.workspace_id = $3
-		RETURNING version_number`,
+		RETURNING version_number, derived_from_version_id`,
 		versionID, timetableID, session.WorkspaceID,
-	).Scan(&versionNumber)
+	).Scan(&versionNumber, &derivedFrom)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "version_create_failed")
+		return
+	}
+	if derivedFrom != nil {
+		_, err = tx.Exec(r.Context(), `
+			INSERT INTO timetable_entry (
+				id, workspace_id, timetable_version_id, stable_entry_uuid, entry_kind,
+				teacher_uuid, cohort_uuid, subject_uuid, cohort_subject_uuid, room_id, resource_id,
+				day_of_week, start_period_index, duration_periods, start_time, end_time, is_pinned
+			)
+			SELECT gen_random_uuid(), workspace_id, $1, stable_entry_uuid, entry_kind,
+			       teacher_uuid, cohort_uuid, subject_uuid, cohort_subject_uuid, room_id, resource_id,
+			       day_of_week, start_period_index, duration_periods, start_time, end_time, is_pinned
+			FROM timetable_entry
+			WHERE workspace_id = $2 AND timetable_version_id = $3`, versionID, session.WorkspaceID, *derivedFrom)
+		if err != nil {
+			writeError(w, http.StatusConflict, "version_create_failed")
+			return
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "version_create_failed")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"version_uuid": versionID, "version_number": versionNumber, "status": "DRAFT"})
@@ -1184,13 +1491,19 @@ func (h *Handler) VersionDetail(w http.ResponseWriter, r *http.Request, session 
 	var timetableID uuid.UUID
 	var versionNumber int
 	var versionStatus string
+	var timetableName, termName, academicYearLabel string
+	var termID uuid.UUID
+	var validationSummary []byte
 	var start, end time.Time
 	err = tx.QueryRow(r.Context(), `
-		SELECT timetable_id, version_number, status, effective_start, effective_end
-		FROM timetable_version
-		WHERE id = $1 AND workspace_id = $2`,
+		SELECT tv.timetable_id, tv.version_number, tv.status, tv.effective_start, tv.effective_end,
+		       t.name, t.academic_term_uuid, term.name, term.academic_year_label, tv.validation_summary
+		FROM timetable_version tv
+		JOIN timetable t ON t.id = tv.timetable_id AND t.workspace_id = tv.workspace_id
+		JOIN external_academic_term term ON term.id = t.academic_term_uuid AND term.workspace_id = tv.workspace_id
+		WHERE tv.id = $1 AND tv.workspace_id = $2`,
 		versionID, session.WorkspaceID,
-	).Scan(&timetableID, &versionNumber, &versionStatus, &start, &end)
+	).Scan(&timetableID, &versionNumber, &versionStatus, &start, &end, &timetableName, &termID, &termName, &academicYearLabel, &validationSummary)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "version_not_found")
 		return
@@ -1201,14 +1514,21 @@ func (h *Handler) VersionDetail(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	_ = tx.Commit(r.Context())
+	validation := map[string]any{}
+	_ = json.Unmarshal(validationSummary, &validation)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version_uuid":    versionID,
-		"timetable_uuid":  timetableID,
-		"version_number":  versionNumber,
-		"status":          versionStatus,
-		"effective_start": start,
-		"effective_end":   end,
-		"entries":         entries,
+		"version_uuid":        versionID,
+		"timetable_uuid":      timetableID,
+		"version_number":      versionNumber,
+		"status":              versionStatus,
+		"effective_start":     start,
+		"effective_end":       end,
+		"name":                timetableName,
+		"term_uuid":           termID,
+		"term_name":           termName,
+		"academic_year_label": academicYearLabel,
+		"validation":          validation,
+		"entries":             entries,
 	})
 }
 
@@ -1334,6 +1654,7 @@ func (h *Handler) deleteEntry(w http.ResponseWriter, r *http.Request, session *l
 		writeError(w, http.StatusNotFound, "entry_not_found")
 		return
 	}
+	_, _ = h.pool.Exec(r.Context(), `UPDATE timetable_version SET status = 'DRAFT', validation_summary = '{}'::jsonb, updated_at = now() WHERE id = $1 AND workspace_id = $2 AND status IN ('VALIDATING', 'VALIDATED')`, versionID, session.WorkspaceID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -1411,6 +1732,7 @@ func (h *Handler) saveEntry(ctx context.Context, workspaceID, versionID, entryID
 	if err != nil {
 		return errCode("entry_save_failed")
 	}
+	_, _ = h.pool.Exec(ctx, `UPDATE timetable_version SET status = 'DRAFT', validation_summary = '{}'::jsonb, updated_at = now() WHERE id = $1 AND workspace_id = $2 AND status IN ('VALIDATING', 'VALIDATED')`, versionID, workspaceID)
 	return nil
 }
 
@@ -1455,6 +1777,21 @@ func (h *Handler) referencesBelong(ctx context.Context, workspaceID uuid.UUID, t
 }
 
 func (h *Handler) TeachingDemands(w http.ResponseWriter, r *http.Request, session *launch.PortalSession) {
+	today, _ := time.Parse("2006-01-02", workspaceLocalDate(session.WorkspaceTimezone))
+	terms, err := h.academicTerms(r.Context(), session.WorkspaceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "teaching_demands_query_failed")
+		return
+	}
+	selected, err := selectTerm(terms, r.URL.Query().Get("term_uuid"), today, true)
+	if err != nil || selected == nil || selected.AcademicYearID == nil {
+		code := "active_term_not_found"
+		if err != nil {
+			code = err.Error()
+		}
+		writeError(w, http.StatusBadRequest, code)
+		return
+	}
 	rows, err := h.pool.Query(r.Context(), `
 		SELECT eta.id, eta.teacher_uuid, COALESCE(a.display_name, ''),
 		       eta.cohort_subject_uuid, eta.cohort_uuid, eta.subject_uuid,
@@ -1464,10 +1801,12 @@ func (h *Handler) TeachingDemands(w http.ResponseWriter, r *http.Request, sessio
 		       COALESCE((eta.scheduling_requirements->>'required_double_lessons')::integer, 0)
 		FROM external_teaching_assignment eta
 		JOIN external_actor a ON a.workspace_id = eta.workspace_id AND a.id = eta.teacher_uuid
+		JOIN external_cohort cohort ON cohort.workspace_id = eta.workspace_id AND cohort.id = eta.cohort_uuid AND cohort.status = 'ACTIVE'
 		WHERE eta.workspace_id = $1
 		  AND eta.status = 'ACTIVE'
+		  AND cohort.academic_year_uuid = $2
 		ORDER BY eta.cohort_name, eta.subject_name, a.display_name`,
-		session.WorkspaceID,
+		session.WorkspaceID, selected.AcademicYearID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "teaching_demands_query_failed")
@@ -1558,5 +1897,5 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, status int, code string) {
-	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code}})
+	writeDomainError(w, status, code, nil)
 }
