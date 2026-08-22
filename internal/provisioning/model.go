@@ -22,13 +22,23 @@ type AcademicSyncPayload struct {
 	Cohorts             []CohortProjection             `json:"cohorts"`
 	Subjects            []SubjectProjection            `json:"subjects"`
 	CohortSubjects      []CohortSubjectProjection      `json:"cohort_subjects"`
+	Learners            []LearnerProjection            `json:"learners"`
+	LearnerMemberships  []LearnerCohortMembershipProjection `json:"learner_cohort_memberships"`
+	LearnerEnrollments  []LearnerSubjectEnrollmentProjection `json:"learner_subject_enrollments"`
 	TeachingAssignments []TeachingAssignmentProjection `json:"teaching_assignments"`
 	AssignmentReadiness AssignmentReadinessProjection  `json:"assignment_readiness"`
+	LearnerReadiness    LearnerReadinessProjection     `json:"learner_readiness"`
 }
 
 type AssignmentReadinessProjection struct {
 	SourceAssignmentCount   int `json:"source_assignment_count"`
 	EligibleAssignmentCount int `json:"eligible_assignment_count"`
+}
+
+type LearnerReadinessProjection struct {
+	SourceLearnerCount      int `json:"source_learner_count"`
+	EligibleLearnerCount    int `json:"eligible_learner_count"`
+	SubjectEnrollmentCount  int `json:"subject_enrollment_count"`
 }
 
 type AcademicYearProjection struct {
@@ -111,6 +121,35 @@ type CohortSubjectProjection struct {
 	CohortRef         string `json:"cohort_ref"`
 	SubjectRef        string `json:"subject_ref"`
 	Label             string `json:"label"`
+}
+
+type LearnerProjection struct {
+	LearnerRef  string `json:"learner_ref"`
+	LearnerUUID string `json:"learner_uuid"`
+	Status      string `json:"status"`
+	SourceVersion string `json:"source_version"`
+}
+
+type LearnerCohortMembershipProjection struct {
+	MembershipRef  string `json:"membership_ref"`
+	MembershipUUID string `json:"membership_uuid"`
+	LearnerUUID    string `json:"learner_uuid"`
+	CohortUUID     string `json:"cohort_uuid"`
+	StartsOn       string `json:"starts_on"`
+	EndsOn         string `json:"ends_on"`
+	Status         string `json:"status"`
+}
+
+type LearnerSubjectEnrollmentProjection struct {
+	EnrollmentRef     string `json:"enrollment_ref"`
+	EnrollmentUUID    string `json:"enrollment_uuid"`
+	LearnerUUID       string `json:"learner_uuid"`
+	CohortUUID        string `json:"cohort_uuid"`
+	CohortSubjectUUID string `json:"cohort_subject_uuid"`
+	SubjectUUID       string `json:"subject_uuid"`
+	StartsOn          string `json:"starts_on"`
+	EndsOn            string `json:"ends_on"`
+	Status            string `json:"status"`
 }
 
 type TeachingAssignmentProjection struct {

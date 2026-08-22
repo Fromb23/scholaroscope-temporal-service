@@ -20,6 +20,8 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 
 	teacherPeriod := map[string]map[string]int{}
 	cohortPeriod := map[string]map[string]int{}
+	learnerPeriod := map[string]map[string]int{}
+	groupPeriod := map[string]map[string]int{}
 	resourcePeriod := map[string]map[string]int{}
 	assignmentCount := map[string]int{}
 	teacherLoad := map[string]int{}
@@ -34,10 +36,29 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 	}
 
 	for _, placement := range placements {
-		assignment, ok := assignmentByID[placement.AssignmentID]
-		if !ok || !assignment.Active || assignment.TeacherID != placement.TeacherID || assignment.CohortID != placement.CohortID || assignment.CohortSubjectID != placement.CohortSubjectID {
-			fail("ASSIGNMENT_AUTHORITY", "assignment", placement.AssignmentID, "", placement.TeacherID, "active normalized assignment", "Scheduled teacher/cohort subject is not authorized by an active assignment.")
+		assignmentIDs := placementAssignmentIDs(placement)
+		primaryID := ""
+		if len(assignmentIDs) > 0 {
+			primaryID = assignmentIDs[0]
+		}
+		assignment, ok := assignmentByID[primaryID]
+		if !ok || !assignment.Active {
+			fail("ASSIGNMENT_AUTHORITY", "assignment", primaryID, "", placement.TeacherID, "active normalized assignment", "Scheduled teacher/cohort subject is not authorized by an active assignment.")
 			continue
+		}
+		placementCohorts := placementCohortIDs(placement)
+		for _, assignmentID := range assignmentIDs {
+			covered, coveredOK := assignmentByID[assignmentID]
+			if !coveredOK || !covered.Active || covered.TeacherID != placement.TeacherID || covered.SubjectID != placement.SubjectID {
+				fail("ASSIGNMENT_AUTHORITY", "assignment", assignmentID, "", placement.TeacherID, "active assignment with the same teacher and subject", "Scheduled delivery group covers an assignment that is not authorized for this teacher and subject.")
+				continue
+			}
+			if !containsString(placementCohorts, covered.CohortID) {
+				fail("ASSIGNMENT_AUTHORITY", "assignment", assignmentID, "", placementCohorts, covered.CohortID, "Placement audience does not include the assignment cohort.")
+			}
+			if !problem.Registrations[covered.CohortID][covered.CohortSubjectID] {
+				fail("COHORT_SUBJECT_VALIDITY", "cohort", covered.CohortID, "", covered.CohortSubjectID, "registered cohort subject", "Scheduled subject is not registered for the cohort.")
+			}
 		}
 		if placement.WorkspaceID != problem.WorkspaceID || assignment.WorkspaceID != problem.WorkspaceID {
 			fail("MULTI_WORKSPACE_ISOLATION", "assignment", placement.AssignmentID, "", placement.WorkspaceID, problem.WorkspaceID, "Placement crosses the workspace boundary.")
@@ -45,12 +66,21 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 		if placement.AcademicYearID != problem.AcademicYearID || placement.TermID != problem.TermID || assignment.AcademicYearID != problem.AcademicYearID || assignment.TermID != problem.TermID {
 			fail("ACADEMIC_BOUNDARIES", "assignment", placement.AssignmentID, "", placement.TermID, problem.TermID, "Placement is outside the selected academic year or term.")
 		}
-		if !problem.Registrations[placement.CohortID][placement.CohortSubjectID] || placement.SubjectID != assignment.SubjectID {
-			fail("COHORT_SUBJECT_VALIDITY", "cohort", placement.CohortID, "", placement.CohortSubjectID, "registered cohort subject", "Scheduled subject is not registered for the cohort.")
-		}
 		teacher, teacherOK := problem.Teachers[placement.TeacherID]
 		if !teacherOK || teacher.WorkspaceID != problem.WorkspaceID || (len(teacher.QualifiedSubjects) > 0 && !teacher.QualifiedSubjects[placement.SubjectID]) {
 			fail("ASSIGNMENT_AUTHORITY", "teacher", placement.TeacherID, "", placement.SubjectID, "qualified active teacher", "Teacher is unavailable to this workspace or is not qualified.")
+		}
+		for _, cohortID := range placementCohorts {
+			cohort, exists := problem.Cohorts[cohortID]
+			if !exists || cohort.WorkspaceID != problem.WorkspaceID {
+				fail("MULTI_WORKSPACE_ISOLATION", "cohort", cohortID, "", placement.WorkspaceID, problem.WorkspaceID, "Placement references a cohort outside this workspace.")
+			}
+		}
+		for _, learnerID := range placement.LearnerIDs {
+			learner, exists := problem.Learners[learnerID]
+			if !exists || learner.WorkspaceID != problem.WorkspaceID || !learner.Active || !containsString(placementCohorts, learner.CohortID) {
+				fail("ACTIVE_LEARNER_ELIGIBILITY", "learner", learnerID, "", placementCohorts, "active learner in a participating cohort", "Delivery-group learner is not active or not eligible for this audience.")
+			}
 		}
 		if placement.Double {
 			if len(placement.PeriodIDs) != 2 {
@@ -68,7 +98,11 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 
 		for _, periodID := range placement.PeriodIDs {
 			period, periodOK := periodByID[periodID]
-			if !periodOK || !period.Teaching || period.Excluded || teacher.Unavailable[periodID] || problem.Cohorts[placement.CohortID].Unavailable[periodID] {
+			cohortUnavailable := false
+			for _, cohortID := range placementCohorts {
+				cohortUnavailable = cohortUnavailable || problem.Cohorts[cohortID].Unavailable[periodID]
+			}
+			if !periodOK || !period.Teaching || period.Excluded || teacher.Unavailable[periodID] || cohortUnavailable {
 				fail("NON_TEACHING_PERIOD_EXCLUSION", "assignment", placement.AssignmentID, periodID, "scheduled", "eligible and available", "Lesson uses a break, closure, excluded, or unavailable period.")
 			}
 			if placement.ResourceID != "" {
@@ -78,11 +112,24 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 				}
 			}
 			incrementNested(teacherPeriod, placement.TeacherID, periodID)
-			incrementNested(cohortPeriod, placement.CohortID, periodID)
+			if placement.DeliveryGroupID != "" {
+				incrementNested(groupPeriod, placement.DeliveryGroupID, periodID)
+			}
+			if len(placement.LearnerIDs) == 0 {
+				for _, cohortID := range placementCohorts {
+					incrementNested(cohortPeriod, cohortID, periodID)
+				}
+			} else {
+				for _, learnerID := range placement.LearnerIDs {
+					incrementNested(learnerPeriod, learnerID, periodID)
+				}
+			}
 			if placement.ResourceID != "" {
 				incrementNested(resourcePeriod, placement.ResourceID, periodID)
 			}
-			assignmentCount[placement.AssignmentID]++
+			for _, assignmentID := range assignmentIDs {
+				assignmentCount[assignmentID]++
+			}
 			teacherLoad[placement.TeacherID]++
 			if teacherDayLoad[placement.TeacherID] == nil {
 				teacherDayLoad[placement.TeacherID] = map[int]int{}
@@ -91,13 +138,15 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 		}
 		if len(placement.PeriodIDs) > 0 {
 			period := periodByID[placement.PeriodIDs[0]]
-			if cohortDaySubject[placement.CohortID] == nil {
-				cohortDaySubject[placement.CohortID] = map[int]map[string][]int{}
+			for _, cohortID := range placementCohorts {
+				if cohortDaySubject[cohortID] == nil {
+					cohortDaySubject[cohortID] = map[int]map[string][]int{}
+				}
+				if cohortDaySubject[cohortID][period.Day] == nil {
+					cohortDaySubject[cohortID][period.Day] = map[string][]int{}
+				}
+				cohortDaySubject[cohortID][period.Day][placement.SubjectID] = append(cohortDaySubject[cohortID][period.Day][placement.SubjectID], period.Index)
 			}
-			if cohortDaySubject[placement.CohortID][period.Day] == nil {
-				cohortDaySubject[placement.CohortID][period.Day] = map[string][]int{}
-			}
-			cohortDaySubject[placement.CohortID][period.Day][placement.SubjectID] = append(cohortDaySubject[placement.CohortID][period.Day][placement.SubjectID], period.Index)
 		}
 	}
 
@@ -113,6 +162,8 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 	}
 	checkOccupancy("NO_TEACHER_DOUBLE_BOOKING", "teacher", teacherPeriod, func(string) int { return 1 })
 	checkOccupancy("NO_COHORT_DOUBLE_BOOKING", "cohort", cohortPeriod, func(string) int { return 1 })
+	checkOccupancy("NO_LEARNER_DOUBLE_BOOKING", "learner", learnerPeriod, func(string) int { return 1 })
+	checkOccupancy("NO_DELIVERY_GROUP_DOUBLE_BOOKING", "delivery_group", groupPeriod, func(string) int { return 1 })
 	checkOccupancy("RESOURCE_EXCLUSIVITY", "resource", resourcePeriod, func(id string) int {
 		capacity := problem.Resources[id].Capacity
 		if capacity <= 0 {
@@ -150,18 +201,63 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 		}
 	}
 
-	if problem.FullCoverage {
-		for cohortID, cohort := range problem.Cohorts {
-			if cohort.WorkspaceID != problem.WorkspaceID {
+	for _, block := range problem.ParallelBlocks {
+		if !block.Active || block.WorkspaceID != problem.WorkspaceID {
+			continue
+		}
+		periodSets := map[string]map[string]bool{}
+		for _, groupID := range block.GroupIDs {
+			periodSets[groupID] = map[string]bool{}
+		}
+		for _, placement := range placements {
+			if placement.ParallelBlockID != block.ID || placement.DeliveryGroupID == "" {
 				continue
 			}
-			for _, period := range usablePeriods(problem) {
-				if cohort.Unavailable[period.ID] {
+			for _, periodID := range placement.PeriodIDs {
+				periodSets[placement.DeliveryGroupID][periodID] = true
+			}
+		}
+		var reference map[string]bool
+		for _, groupID := range block.GroupIDs {
+			if reference == nil {
+				reference = periodSets[groupID]
+				continue
+			}
+			if !sameStringSet(reference, periodSets[groupID]) {
+				fail("PARALLEL_BLOCK_SIMULTANEITY", "parallel_block", block.ID, "", periodSets[groupID], reference, "Parallel block members must run in the same periods.")
+			}
+		}
+	}
+
+	if problem.FullCoverage {
+		if len(problem.Learners) > 0 {
+			for learnerID, learner := range problem.Learners {
+				if learner.WorkspaceID != problem.WorkspaceID || !learner.Active {
 					continue
 				}
-				count := cohortPeriod[cohortID][period.ID]
-				if period.Mandatory && count != 1 {
-					fail("SIMULTANEOUS_COHORT_COVERAGE", "cohort", cohortID, period.ID, count, 1, "Full-coverage cohort does not have exactly one lesson in the mandatory period.")
+				for _, period := range usablePeriods(problem) {
+					if !period.Mandatory || problem.Cohorts[learner.CohortID].Unavailable[period.ID] {
+						continue
+					}
+					count := learnerPeriod[learnerID][period.ID]
+					if count != 1 {
+						fail("SIMULTANEOUS_COHORT_COVERAGE", "learner", learnerID, period.ID, count, 1, "Full coverage requires every active learner to be covered exactly once in each mandatory teaching period.")
+					}
+				}
+			}
+		} else {
+			for cohortID, cohort := range problem.Cohorts {
+				if cohort.WorkspaceID != problem.WorkspaceID {
+					continue
+				}
+				for _, period := range usablePeriods(problem) {
+					if cohort.Unavailable[period.ID] {
+						continue
+					}
+					count := cohortPeriod[cohortID][period.ID]
+					if period.Mandatory && count != 1 {
+						fail("SIMULTANEOUS_COHORT_COVERAGE", "cohort", cohortID, period.ID, count, 1, "Full-coverage cohort does not have exactly one lesson in the mandatory period.")
+					}
 				}
 			}
 		}
@@ -169,7 +265,7 @@ func ValidateSchedule(problem EngineProblem, placements []EnginePlacement, confi
 
 	fairness := calculateFairness(problem, teacherLoad, teacherDayLoad, cohortDaySubject, teacherPeriod, config)
 	soft := fairness.RepeatedSubjectClusters + fairness.IdleGaps + fairness.ConsecutiveOverloads
-	allInvariants := []string{"SIMULTANEOUS_COHORT_COVERAGE", "NO_TEACHER_DOUBLE_BOOKING", "NO_COHORT_DOUBLE_BOOKING", "ASSIGNMENT_AUTHORITY", "COHORT_SUBJECT_VALIDITY", "COMPLETE_DEMAND_SATISFACTION", "TEACHER_WORKLOAD_LIMITS", "DOUBLE_LESSON_CONTIGUITY", "NON_TEACHING_PERIOD_EXCLUSION", "ACADEMIC_BOUNDARIES", "RESOURCE_EXCLUSIVITY", "DISTINCT_SIMULTANEOUS_TEACHERS", "MULTI_WORKSPACE_ISOLATION", "SAFE_PUBLICATION", "BOUNDED_EXECUTION", "DETERMINISTIC_REPRODUCIBILITY"}
+	allInvariants := []string{"SIMULTANEOUS_COHORT_COVERAGE", "NO_TEACHER_DOUBLE_BOOKING", "NO_COHORT_DOUBLE_BOOKING", "NO_LEARNER_DOUBLE_BOOKING", "NO_DELIVERY_GROUP_DOUBLE_BOOKING", "PARALLEL_BLOCK_SIMULTANEITY", "ACTIVE_LEARNER_ELIGIBILITY", "ASSIGNMENT_AUTHORITY", "COHORT_SUBJECT_VALIDITY", "COMPLETE_DEMAND_SATISFACTION", "TEACHER_WORKLOAD_LIMITS", "DOUBLE_LESSON_CONTIGUITY", "NON_TEACHING_PERIOD_EXCLUSION", "ACADEMIC_BOUNDARIES", "RESOURCE_EXCLUSIVITY", "DISTINCT_SIMULTANEOUS_TEACHERS", "MULTI_WORKSPACE_ISOLATION", "SAFE_PUBLICATION", "BOUNDED_EXECUTION", "DETERMINISTIC_REPRODUCIBILITY"}
 	for _, invariant := range allInvariants {
 		if !failed[invariant] {
 			results = append(results, InvariantResult{Invariant: invariant, Passed: true, WorkspaceID: problem.WorkspaceID, Explanation: "No violation observed."})
@@ -189,6 +285,47 @@ func incrementNested(target map[string]map[string]int, outer, inner string) {
 		target[outer] = map[string]int{}
 	}
 	target[outer][inner]++
+}
+
+func placementAssignmentIDs(placement EnginePlacement) []string {
+	if len(placement.AssignmentIDs) > 0 {
+		return uniqueStrings(placement.AssignmentIDs)
+	}
+	if placement.AssignmentID != "" {
+		return []string{placement.AssignmentID}
+	}
+	return nil
+}
+
+func placementCohortIDs(placement EnginePlacement) []string {
+	if len(placement.CohortIDs) > 0 {
+		return uniqueStrings(placement.CohortIDs)
+	}
+	if placement.CohortID != "" {
+		return []string{placement.CohortID}
+	}
+	return nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func sameStringSet(left, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if value && !right[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func calculateFairness(problem EngineProblem, loads map[string]int, daily map[string]map[int]int, subject map[string]map[int]map[string][]int, occupancy map[string]map[string]int, config EngineConfig) FairnessMetrics {

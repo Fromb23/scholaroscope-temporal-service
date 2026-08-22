@@ -385,6 +385,36 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 		       te.duration_periods, te.start_period_index,
 		       COALESCE(eta.teacher_ref, ''), COALESCE(eta.cohort_ref, ''),
 		       COALESCE(eta.subject_ref, ''), COALESCE(eta.cohort_subject_ref, ''),
+		       te.delivery_group_uuid, te.parallel_block_uuid, te.learner_count,
+		       COALESCE((
+		         SELECT jsonb_agg(jsonb_build_object(
+		           'cohort_uuid', cohort.id::text,
+		           'cohort_ref', cohort.scholaroscope_cohort_ref,
+		           'cohort_name', cohort.name
+		         ) ORDER BY cohort.name)
+		         FROM external_cohort cohort
+		         WHERE cohort.workspace_id = te.workspace_id
+		           AND cohort.id = ANY(te.cohort_uuids)
+		       ), CASE WHEN te.cohort_uuid IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(jsonb_build_object(
+		           'cohort_uuid', te.cohort_uuid::text,
+		           'cohort_ref', COALESCE(c.scholaroscope_cohort_ref, ''),
+		           'cohort_name', COALESCE(c.name, '')
+		       )) END) AS cohorts,
+		       COALESCE((
+		         SELECT jsonb_agg(jsonb_build_object(
+		           'cohort_subject_uuid', cohort_subject.id::text,
+		           'cohort_subject_ref', cohort_subject.scholaroscope_cohort_subject_ref,
+		           'cohort_uuid', cohort_subject.cohort_uuid::text
+		         ) ORDER BY cohort_subject.label)
+		         FROM external_cohort_subject cohort_subject
+		         WHERE cohort_subject.workspace_id = te.workspace_id
+		           AND cohort_subject.id = ANY(te.cohort_subject_uuids)
+		       ), CASE WHEN te.cohort_subject_uuid IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(jsonb_build_object(
+		           'cohort_subject_uuid', te.cohort_subject_uuid::text,
+		           'cohort_subject_ref', COALESCE(eta.cohort_subject_ref, ''),
+		           'cohort_uuid', COALESCE(te.cohort_uuid::text, '')
+		       )) END) AS cohort_subjects,
+		       to_jsonb(COALESCE(te.teaching_assignment_uuids, '{}'::uuid[])) AS teaching_assignment_uuids,
 		       EXISTS(
 		         SELECT 1 FROM scheduling_conflict conflict
 		         WHERE conflict.org_id = te.workspace_id
@@ -420,6 +450,9 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 		var day, duration, startPeriod int
 		var startTime, endTime string
 		var teacherRef, cohortRef, subjectRef, cohortSubjectRef string
+		var deliveryGroupID, parallelBlockID *uuid.UUID
+		var learnerCount int
+		var cohortsJSON, cohortSubjectsJSON, assignmentIDsJSON []byte
 		var hasHardConflict bool
 		if err := rows.Scan(
 			&entryID, &stableID, &teacherID, &teacherName,
@@ -429,9 +462,25 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 			&day, &startTime, &endTime,
 			&duration, &startPeriod,
 			&teacherRef, &cohortRef, &subjectRef, &cohortSubjectRef,
+			&deliveryGroupID, &parallelBlockID, &learnerCount,
+			&cohortsJSON, &cohortSubjectsJSON, &assignmentIDsJSON,
 			&hasHardConflict,
 		); err != nil {
 			return nil, err
+		}
+		var cohorts, cohortSubjects []map[string]any
+		var teachingAssignmentUUIDs []string
+		_ = json.Unmarshal(cohortsJSON, &cohorts)
+		_ = json.Unmarshal(cohortSubjectsJSON, &cohortSubjects)
+		_ = json.Unmarshal(assignmentIDsJSON, &teachingAssignmentUUIDs)
+		if cohortName == "" && len(cohorts) > 0 {
+			names := []string{}
+			for _, item := range cohorts {
+				if name, ok := item["cohort_name"].(string); ok && name != "" {
+					names = append(names, name)
+				}
+			}
+			cohortName = strings.Join(names, ", ")
 		}
 		entries = append(entries, map[string]any{
 			"entry_uuid":          entryID.String(),
@@ -452,6 +501,12 @@ func (h *Handler) entriesForVersionTx(ctx context.Context, tx pgx.Tx, workspaceI
 			"subject_id":          subjectRef,
 			"cohort_subject_uuid": uuidString(cohortSubjectID),
 			"cohort_subject_ref":  cohortSubjectRef,
+			"cohorts":             cohorts,
+			"cohort_subjects":     cohortSubjects,
+			"teaching_assignment_uuids": teachingAssignmentUUIDs,
+			"delivery_group_uuid": uuidString(deliveryGroupID),
+			"parallel_block_uuid": uuidString(parallelBlockID),
+			"learner_count":       learnerCount,
 			"room_uuid":           uuidString(roomID),
 			"room_name":           roomName,
 			"day_of_week":         dayName(day),
@@ -1608,12 +1663,17 @@ func (h *Handler) updateEntry(w http.ResponseWriter, r *http.Request, session *l
 		return
 	}
 	var stableID uuid.UUID
+	var parallelBlockID *uuid.UUID
 	err = h.pool.QueryRow(r.Context(), `
-		SELECT stable_entry_uuid FROM timetable_entry WHERE id = $1 AND workspace_id = $2 AND timetable_version_id = $3`,
+		SELECT stable_entry_uuid, parallel_block_uuid FROM timetable_entry WHERE id = $1 AND workspace_id = $2 AND timetable_version_id = $3`,
 		entryID, session.WorkspaceID, versionID,
-	).Scan(&stableID)
+	).Scan(&stableID, &parallelBlockID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "entry_not_found")
+		return
+	}
+	if parallelBlockID != nil {
+		writeError(w, http.StatusConflict, "parallel_block_atomic_move_required")
 		return
 	}
 	if !h.versionEditable(r.Context(), session.WorkspaceID, versionID) {

@@ -154,6 +154,29 @@ export type TeachingDemandResponse = {
   status: string;
 };
 
+export type DeliveryGroup = {
+  delivery_group_uuid: string;
+  name: string;
+  teacher_uuid: string;
+  teacher_name: string;
+  subject_uuid: string;
+  subject_name: string;
+  shared_periods_per_cycle: number;
+  required_double_lessons: number;
+  assignment_count: number;
+  learner_count: number;
+  assignments: Array<{
+    teaching_assignment_uuid: string;
+    cohort_name: string;
+    subject_name: string;
+  }>;
+};
+
+export type DeliveryGroupsResponse = {
+  delivery_groups: DeliveryGroup[];
+  count: number;
+};
+
 export type CalendarException = {
   exception_uuid: string;
   date: string;
@@ -258,10 +281,16 @@ export type TimetableEntry = {
   teacher_name: string;
   cohort_uuid: string;
   cohort_name: string;
+  cohorts?: Array<{ cohort_uuid: string; cohort_ref: string; cohort_name: string }>;
   subject_uuid: string;
   subject_name: string;
   subject_code: string;
   cohort_subject_uuid: string;
+  cohort_subjects?: Array<{ cohort_subject_uuid: string; cohort_subject_ref: string; cohort_uuid: string }>;
+  teaching_assignment_uuids?: string[];
+  delivery_group_uuid?: string;
+  parallel_block_uuid?: string;
+  learner_count?: number;
   room_uuid: string;
   room_name: string;
   day_of_week: string;

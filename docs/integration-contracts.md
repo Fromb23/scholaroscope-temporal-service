@@ -24,10 +24,18 @@ implemented for development.
 
 Unknown major schema versions fail safely. Duplicate `event_id` or `idempotency_key` is idempotent. Out-of-order aggregate versions are rejected or marked for reconciliation.
 
-Full academic snapshots include `assignment_readiness.source_assignment_count`
-and `assignment_readiness.eligible_assignment_count`. This distinguishes an
-empty Scholaroscope assignment source from assignments excluded by active
-teacher, curriculum, or canonical cohort-subject eligibility rules.
+Full academic snapshots include `assignment_readiness.source_assignment_count`,
+`assignment_readiness.eligible_assignment_count`, `learner_readiness`, opaque
+learner UUIDs, active learner-to-cohort memberships, and active
+learner-to-cohort-subject enrolments. This distinguishes an empty
+Scholaroscope assignment source from assignments excluded by active teacher,
+curriculum, or canonical cohort-subject eligibility rules, and it lets Temporal
+detect learner-audience intersections without copying learner names.
+
+Scholaroscope owns learner eligibility and teaching authority. Temporal owns
+bell periods, resources, teacher availability, delivery-group policy,
+parallel-block policy, generation, manual placement, validation, revision, and
+publication. Cohort identity and physical rooms are separate concepts.
 
 ## Signing
 
@@ -41,6 +49,9 @@ Each installation has a separate secret. The sender signs timestamp and raw requ
 - `scholaroscope.academic.teacher.upserted.v1`
 - `scholaroscope.academic.term.upserted.v1`
 - `scholaroscope.academic.cohort.upserted.v1`
+- `scholaroscope.academic.learner.upserted.v1`
+- `scholaroscope.academic.learner_cohort_membership.upserted.v1`
+- `scholaroscope.academic.learner_subject_enrollment.upserted.v1`
 - `scholaroscope.academic.subject.upserted.v1`
 - `scholaroscope.academic.cohort_subject.upserted.v1`
 - `scholaroscope.academic.teaching_assignment.upserted.v1`
@@ -126,6 +137,10 @@ management endpoints:
 - `POST /api/v1/rooms`
 - `PATCH|DELETE /api/v1/rooms/{room_uuid}`
 - `PATCH /api/v1/classes/{cohort_uuid}/default-room`
+- `GET|POST /api/v1/delivery-groups`
+- `DELETE /api/v1/delivery-groups/{delivery_group_uuid}`
+- `GET|POST /api/v1/parallel-blocks`
+- `DELETE /api/v1/parallel-blocks/{parallel_block_uuid}`
 - `GET /api/v1/timetables`
 - `GET /api/v1/conflicts`
 - `POST /api/v1/timetable-versions/{version_uuid}/validate`
@@ -134,6 +149,12 @@ management endpoints:
 Legacy `/orgs/{orgId}/...` routes remain guarded by the portal session and must
 match the authenticated workspace UUID before serving data or accepting
 mutations.
+
+Published learning entries include delivery-group identity, optional
+parallel-block identity, all participating cohort subjects, all participating
+cohorts, teacher, subject, optional room, learner audience count, day/period
+range, and stable logical entry identity. Scholaroscope persists these fields
+in its projection read model and renders them without learner identities.
 
 ## Portal routes
 

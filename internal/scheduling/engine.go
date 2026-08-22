@@ -32,6 +32,8 @@ type attemptState struct {
 	doubles     map[string]int
 	teacherOcc  map[string]map[string]bool
 	cohortOcc   map[string]map[string]bool
+	learnerOcc  map[string]map[string]bool
+	groupOcc    map[string]map[string]bool
 	resourceOcc map[string]map[string]int
 	iterations  int
 	timedOut    bool
@@ -97,7 +99,10 @@ func Solve(problem EngineProblem, config EngineConfig) SolveResult {
 }
 
 func solveAttempt(problem EngineProblem, config EngineConfig, deadline time.Time, rng *rand.Rand) attemptState {
-	state := attemptState{remaining: map[string]int{}, doubles: map[string]int{}, teacherOcc: map[string]map[string]bool{}, cohortOcc: map[string]map[string]bool{}, resourceOcc: map[string]map[string]int{}}
+	if len(problem.DeliveryGroups) > 0 || len(problem.Learners) > 0 || len(problem.ParallelBlocks) > 0 {
+		return solveAudienceAttempt(problem, config, deadline, rng)
+	}
+	state := attemptState{remaining: map[string]int{}, doubles: map[string]int{}, teacherOcc: map[string]map[string]bool{}, cohortOcc: map[string]map[string]bool{}, learnerOcc: map[string]map[string]bool{}, groupOcc: map[string]map[string]bool{}, resourceOcc: map[string]map[string]int{}}
 	assignments := map[string]EngineAssignment{}
 	for _, assignment := range problem.Assignments {
 		if assignmentIsSchedulable(problem, assignment) {

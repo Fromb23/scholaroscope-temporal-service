@@ -120,17 +120,29 @@ func (r *Repo) BootstrapWorkspace(ctx context.Context, payload BootstrapPayload)
 		return nil, fmt.Errorf("provisioning repo: marshal academic snapshot: %w", err)
 	}
 	snapshotHash := fmt.Sprintf("%x", sha256.Sum256(snapshotJSON))
+	learnerSnapshotJSON, err := json.Marshal(map[string]any{
+		"learners":                   payload.AcademicSync.Learners,
+		"learner_cohort_memberships": payload.AcademicSync.LearnerMemberships,
+		"learner_subject_enrollments": payload.AcademicSync.LearnerEnrollments,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("provisioning repo: marshal learner snapshot: %w", err)
+	}
+	learnerSnapshotHash := fmt.Sprintf("%x", sha256.Sum256(learnerSnapshotJSON))
 	if _, err := tx.Exec(ctx, `
 		UPDATE external_workspace
 		SET academic_snapshot_hash = $1,
 		    source_assignment_count = $3,
 		    eligible_assignment_count = $4,
+		    source_learner_count = $5,
+		    eligible_learner_count = $6,
+		    learner_enrollment_snapshot_hash = $7,
 		    last_successful_sync_at = now(),
 		    integration_health = 'HEALTHY',
 		    reconciliation_required = false,
 		    last_error = NULL,
 		    updated_at = now()
-		WHERE id = $2`, snapshotHash, workspaceID, payload.AcademicSync.AssignmentReadiness.SourceAssignmentCount, payload.AcademicSync.AssignmentReadiness.EligibleAssignmentCount); err != nil {
+		WHERE id = $2`, snapshotHash, workspaceID, payload.AcademicSync.AssignmentReadiness.SourceAssignmentCount, payload.AcademicSync.AssignmentReadiness.EligibleAssignmentCount, payload.AcademicSync.LearnerReadiness.SourceLearnerCount, payload.AcademicSync.LearnerReadiness.EligibleLearnerCount, learnerSnapshotHash); err != nil {
 		return nil, fmt.Errorf("provisioning repo: record academic snapshot: %w", err)
 	}
 
@@ -196,6 +208,9 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 		"UPDATE external_cohort SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
 		"UPDATE external_subject SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
 		"UPDATE external_cohort_subject SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
+		"UPDATE external_learner SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
+		"UPDATE external_learner_cohort_membership SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
+		"UPDATE external_learner_subject_enrollment SET status = 'DISABLED', updated_at = now() WHERE workspace_id = $1",
 	} {
 		if _, err := tx.Exec(ctx, statement, workspaceID); err != nil {
 			return fmt.Errorf("provisioning repo: disable stale academic projection: %w", err)
@@ -487,6 +502,114 @@ func (r *Repo) upsertAcademicSync(ctx context.Context, tx execer, workspaceID uu
 			return fmt.Errorf("provisioning repo: upsert cohort subject: %w", err)
 		}
 	}
+	for _, learner := range sync.Learners {
+		learnerID, err := uuid.Parse(learner.LearnerUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid learner uuid: %w", err)
+		}
+		status := strings.ToUpper(strings.TrimSpace(learner.Status))
+		if status == "" {
+			status = "ACTIVE"
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO external_learner (
+				id, workspace_id, scholaroscope_learner_ref, status, source_version
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (workspace_id, scholaroscope_learner_ref)
+			DO UPDATE SET status = EXCLUDED.status,
+			              source_version = EXCLUDED.source_version,
+			              updated_at = now()`,
+			learnerID, workspaceID, learner.LearnerRef, status, learner.SourceVersion,
+		)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: upsert learner: %w", err)
+		}
+	}
+	for _, membership := range sync.LearnerMemberships {
+		id, err := uuid.Parse(membership.MembershipUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid learner membership uuid: %w", err)
+		}
+		learnerID, err := uuid.Parse(membership.LearnerUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid membership learner uuid: %w", err)
+		}
+		cohortID, err := uuid.Parse(membership.CohortUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid membership cohort uuid: %w", err)
+		}
+		status := strings.ToUpper(strings.TrimSpace(membership.Status))
+		if status == "" {
+			status = "ACTIVE"
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO external_learner_cohort_membership (
+				id, workspace_id, learner_uuid, cohort_uuid,
+				scholaroscope_membership_ref, starts_on, ends_on, status
+			)
+			VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8)
+			ON CONFLICT (workspace_id, scholaroscope_membership_ref)
+			DO UPDATE SET learner_uuid = EXCLUDED.learner_uuid,
+			              cohort_uuid = EXCLUDED.cohort_uuid,
+			              starts_on = EXCLUDED.starts_on,
+			              ends_on = EXCLUDED.ends_on,
+			              status = EXCLUDED.status,
+			              updated_at = now()`,
+			id, workspaceID, learnerID, cohortID, membership.MembershipRef,
+			nullableDateString(membership.StartsOn), nullableDateString(membership.EndsOn), status,
+		)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: upsert learner cohort membership: %w", err)
+		}
+	}
+	for _, enrollment := range sync.LearnerEnrollments {
+		id, err := uuid.Parse(enrollment.EnrollmentUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid learner enrollment uuid: %w", err)
+		}
+		learnerID, err := uuid.Parse(enrollment.LearnerUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid enrollment learner uuid: %w", err)
+		}
+		cohortID, err := uuid.Parse(enrollment.CohortUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid enrollment cohort uuid: %w", err)
+		}
+		cohortSubjectID, err := uuid.Parse(enrollment.CohortSubjectUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid enrollment cohort subject uuid: %w", err)
+		}
+		subjectID, err := uuid.Parse(enrollment.SubjectUUID)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: invalid enrollment subject uuid: %w", err)
+		}
+		status := strings.ToUpper(strings.TrimSpace(enrollment.Status))
+		if status == "" {
+			status = "ACTIVE"
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO external_learner_subject_enrollment (
+				id, workspace_id, learner_uuid, cohort_uuid, cohort_subject_uuid,
+				subject_uuid, scholaroscope_enrollment_ref, starts_on, ends_on, status
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9::date, $10)
+			ON CONFLICT (workspace_id, scholaroscope_enrollment_ref)
+			DO UPDATE SET learner_uuid = EXCLUDED.learner_uuid,
+			              cohort_uuid = EXCLUDED.cohort_uuid,
+			              cohort_subject_uuid = EXCLUDED.cohort_subject_uuid,
+			              subject_uuid = EXCLUDED.subject_uuid,
+			              starts_on = EXCLUDED.starts_on,
+			              ends_on = EXCLUDED.ends_on,
+			              status = EXCLUDED.status,
+			              updated_at = now()`,
+			id, workspaceID, learnerID, cohortID, cohortSubjectID, subjectID,
+			enrollment.EnrollmentRef, nullableDateString(enrollment.StartsOn), nullableDateString(enrollment.EndsOn), status,
+		)
+		if err != nil {
+			return fmt.Errorf("provisioning repo: upsert learner subject enrollment: %w", err)
+		}
+	}
 	for _, assignment := range sync.TeachingAssignments {
 		if strings.TrimSpace(assignment.SourceModel) == "" {
 			assignment.SourceModel = "academic.CohortSubjectInstructor"
@@ -567,4 +690,12 @@ func (r *Repo) DisableWorkspace(ctx context.Context, scholaroscopeInstallationRe
 		return fmt.Errorf("provisioning repo: disable installation: %w", err)
 	}
 	return nil
+}
+
+func nullableDateString(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
 }

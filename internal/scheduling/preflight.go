@@ -38,6 +38,9 @@ func AnalyzeFeasibility(problem EngineProblem) FeasibilityReport {
 	if len(periods) == 0 {
 		add(FeasibilityIssue{Code: "NO_USABLE_PERIODS", Constraint: "NON_TEACHING_PERIOD_EXCLUSION", RequiredCapacity: 1, AvailableCapacity: 0, Message: "The active calendar has no usable teaching periods.", SuggestedAction: "Configure and activate bell periods."})
 	}
+	if len(problem.DeliveryGroups) > 0 || len(problem.Learners) > 0 || len(problem.ParallelBlocks) > 0 {
+		return analyzeAudienceFeasibility(problem, periods, issues, started)
+	}
 
 	teacherDemand := map[string]int{}
 	cohortDemand := map[string]int{}

@@ -38,6 +38,13 @@ type EngineCohort struct {
 	Unavailable map[string]bool `json:"unavailable,omitempty"`
 }
 
+type EngineLearner struct {
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspace_id"`
+	CohortID    string `json:"cohort_id"`
+	Active      bool   `json:"active"`
+}
+
 type EngineResource struct {
 	ID          string          `json:"id"`
 	WorkspaceID string          `json:"workspace_id"`
@@ -75,6 +82,35 @@ type EngineAssignment struct {
 	Active          bool   `json:"active"`
 }
 
+// EngineDeliveryGroup is a timetable-owned audience. It may cover one ordinary
+// cohort-subject assignment or several assignments taught once as a merged
+// lesson. LearnerIDs is intentionally opaque: Scholaroscope owns identifiable
+// learner records, while the engine needs only stable conflict keys.
+type EngineDeliveryGroup struct {
+	ID             string   `json:"id"`
+	WorkspaceID    string   `json:"workspace_id"`
+	AcademicYearID string   `json:"academic_year_id"`
+	TermID         string   `json:"term_id"`
+	Name           string   `json:"name"`
+	TeacherID      string   `json:"teacher_id"`
+	SubjectID      string   `json:"subject_id"`
+	AssignmentIDs  []string `json:"assignment_ids"`
+	CohortIDs      []string `json:"cohort_ids"`
+	LearnerIDs     []string `json:"learner_ids"`
+	ResourceID     string   `json:"resource_id,omitempty"`
+	WeeklyPeriods  int      `json:"weekly_periods"`
+	DoubleBlocks   int      `json:"double_blocks"`
+	Mandatory      bool     `json:"mandatory"`
+	Active         bool     `json:"active"`
+}
+
+type EngineParallelBlock struct {
+	ID          string   `json:"id"`
+	WorkspaceID string   `json:"workspace_id"`
+	GroupIDs    []string `json:"group_ids"`
+	Active      bool     `json:"active"`
+}
+
 type EngineProblem struct {
 	WorkspaceID        string                     `json:"workspace_id"`
 	AcademicYearID     string                     `json:"academic_year_id"`
@@ -82,8 +118,11 @@ type EngineProblem struct {
 	Periods            []EnginePeriod             `json:"periods"`
 	Teachers           map[string]EngineTeacher   `json:"teachers"`
 	Cohorts            map[string]EngineCohort    `json:"cohorts"`
+	Learners           map[string]EngineLearner   `json:"learners,omitempty"`
 	Resources          map[string]EngineResource  `json:"resources,omitempty"`
 	Assignments        []EngineAssignment         `json:"assignments"`
+	DeliveryGroups     []EngineDeliveryGroup      `json:"delivery_groups,omitempty"`
+	ParallelBlocks     []EngineParallelBlock      `json:"parallel_blocks,omitempty"`
 	Registrations      map[string]map[string]bool `json:"registrations"`
 	FullCoverage       bool                       `json:"full_coverage"`
 	Existing           []EnginePlacement          `json:"existing,omitempty"`
@@ -92,13 +131,18 @@ type EngineProblem struct {
 
 type EnginePlacement struct {
 	AssignmentID    string   `json:"assignment_id"`
+	AssignmentIDs   []string `json:"assignment_ids,omitempty"`
+	DeliveryGroupID string   `json:"delivery_group_id,omitempty"`
+	ParallelBlockID string   `json:"parallel_block_id,omitempty"`
 	WorkspaceID     string   `json:"workspace_id"`
 	AcademicYearID  string   `json:"academic_year_id"`
 	TermID          string   `json:"term_id"`
 	TeacherID       string   `json:"teacher_id"`
 	CohortID        string   `json:"cohort_id"`
+	CohortIDs       []string `json:"cohort_ids,omitempty"`
 	CohortSubjectID string   `json:"cohort_subject_id"`
 	SubjectID       string   `json:"subject_id"`
+	LearnerIDs      []string `json:"learner_ids,omitempty"`
 	ResourceID      string   `json:"resource_id,omitempty"`
 	PeriodIDs       []string `json:"period_ids"`
 	Double          bool     `json:"double"`

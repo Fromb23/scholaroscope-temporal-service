@@ -164,6 +164,199 @@ func TestCohortSpecificActivitiesDoNotGloballyBlockOtherClasses(t *testing.T) {
 	}
 }
 
+func audienceScenarioProblem() EngineProblem {
+	periods := []EnginePeriod{
+		{ID: "p1", Day: 0, Index: 0, Teaching: true, Mandatory: true},
+		{ID: "p2", Day: 0, Index: 1, Teaching: true, Mandatory: true},
+		{ID: "p3", Day: 1, Index: 0, Teaching: true, Mandatory: true},
+		{ID: "p4", Day: 1, Index: 1, Teaching: true, Mandatory: true},
+		{ID: "p5", Day: 2, Index: 0, Teaching: true, Mandatory: true},
+		{ID: "p6", Day: 2, Index: 1, Teaching: true, Mandatory: true},
+	}
+	return EngineProblem{
+		WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", Periods: periods,
+		Teachers: map[string]EngineTeacher{
+			"teacher-computer": {ID: "teacher-computer", WorkspaceID: "workspace", WorkloadLimit: len(periods), Unavailable: map[string]bool{}},
+			"teacher-arts-a":   {ID: "teacher-arts-a", WorkspaceID: "workspace", WorkloadLimit: len(periods), Unavailable: map[string]bool{}},
+			"teacher-arts-b":   {ID: "teacher-arts-b", WorkspaceID: "workspace", WorkloadLimit: len(periods), Unavailable: map[string]bool{}},
+			"teacher-ict":      {ID: "teacher-ict", WorkspaceID: "workspace", WorkloadLimit: len(periods), Unavailable: map[string]bool{}},
+		},
+		Cohorts: map[string]EngineCohort{
+			"g10a": {ID: "g10a", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+			"g10b": {ID: "g10b", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+			"g10c": {ID: "g10c", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+			"g10d": {ID: "g10d", WorkspaceID: "workspace", Unavailable: map[string]bool{}},
+		},
+		Learners: map[string]EngineLearner{
+			"a-cs": {ID: "a-cs", WorkspaceID: "workspace", CohortID: "g10a", Active: true},
+			"a-fa": {ID: "a-fa", WorkspaceID: "workspace", CohortID: "g10a", Active: true},
+			"b-cs": {ID: "b-cs", WorkspaceID: "workspace", CohortID: "g10b", Active: true},
+			"b-fa": {ID: "b-fa", WorkspaceID: "workspace", CohortID: "g10b", Active: true},
+			"c-cs": {ID: "c-cs", WorkspaceID: "workspace", CohortID: "g10c", Active: true},
+			"c-fa": {ID: "c-fa", WorkspaceID: "workspace", CohortID: "g10c", Active: true},
+			"d-cs": {ID: "d-cs", WorkspaceID: "workspace", CohortID: "g10d", Active: true},
+			"d-fa": {ID: "d-fa", WorkspaceID: "workspace", CohortID: "g10d", Active: true},
+		},
+		Registrations: map[string]map[string]bool{
+			"g10a": {"a-computer": true, "a-arts": true, "a-ict": true},
+			"g10b": {"b-computer": true, "b-arts": true, "b-ict": true},
+			"g10c": {"c-computer": true, "c-arts": true, "c-ict": true},
+			"g10d": {"d-computer": true, "d-arts": true, "d-ict": true},
+		},
+		Assignments: []EngineAssignment{
+			{ID: "a-computer", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-computer", CohortID: "g10a", CohortSubjectID: "a-computer", SubjectID: "computer", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "b-computer", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-computer", CohortID: "g10b", CohortSubjectID: "b-computer", SubjectID: "computer", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "c-computer", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-computer", CohortID: "g10c", CohortSubjectID: "c-computer", SubjectID: "computer", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "d-computer", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-computer", CohortID: "g10d", CohortSubjectID: "d-computer", SubjectID: "computer", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "a-arts", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-arts-a", CohortID: "g10a", CohortSubjectID: "a-arts", SubjectID: "arts", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "b-arts", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-arts-a", CohortID: "g10b", CohortSubjectID: "b-arts", SubjectID: "arts", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "c-arts", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-arts-b", CohortID: "g10c", CohortSubjectID: "c-arts", SubjectID: "arts", WeeklyPeriods: 1, Mandatory: true, Active: true},
+			{ID: "d-arts", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-arts-b", CohortID: "g10d", CohortSubjectID: "d-arts", SubjectID: "arts", WeeklyPeriods: 1, Mandatory: true, Active: true},
+		},
+	}
+}
+
+func TestSplitCohortDisjointLearnersCanSharePeriod(t *testing.T) {
+	problem := audienceScenarioProblem()
+	problem.Assignments = []EngineAssignment{problem.Assignments[0], problem.Assignments[4]}
+	report := ValidateSchedule(problem, []EnginePlacement{
+		{AssignmentID: "a-computer", AssignmentIDs: []string{"a-computer"}, DeliveryGroupID: "group-computer-a", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-computer", CohortID: "g10a", CohortIDs: []string{"g10a"}, SubjectID: "computer", LearnerIDs: []string{"a-cs"}, PeriodIDs: []string{"p1"}},
+		{AssignmentID: "a-arts", AssignmentIDs: []string{"a-arts"}, DeliveryGroupID: "group-arts-a", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-arts-a", CohortID: "g10a", CohortIDs: []string{"g10a"}, SubjectID: "arts", LearnerIDs: []string{"a-fa"}, PeriodIDs: []string{"p1"}},
+	}, EngineConfig{})
+	if !report.Valid {
+		t.Fatalf("split disjoint learners should validate: %+v", firstFailure(report))
+	}
+}
+
+func TestIllegalLearnerOverlapIsRejected(t *testing.T) {
+	problem := audienceScenarioProblem()
+	problem.Assignments = []EngineAssignment{problem.Assignments[0], problem.Assignments[4]}
+	report := ValidateSchedule(problem, []EnginePlacement{
+		{AssignmentID: "a-computer", AssignmentIDs: []string{"a-computer"}, DeliveryGroupID: "group-computer-a", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-computer", CohortID: "g10a", CohortIDs: []string{"g10a"}, SubjectID: "computer", LearnerIDs: []string{"a-cs"}, PeriodIDs: []string{"p1"}},
+		{AssignmentID: "a-arts", AssignmentIDs: []string{"a-arts"}, DeliveryGroupID: "group-arts-a", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-arts-a", CohortID: "g10a", CohortIDs: []string{"g10a"}, SubjectID: "arts", LearnerIDs: []string{"a-cs"}, PeriodIDs: []string{"p1"}},
+	}, EngineConfig{})
+	if report.Valid || !hasFailedInvariant(report, "NO_LEARNER_DOUBLE_BOOKING") {
+		t.Fatalf("overlapping learner audiences should fail deterministically: %+v", report.Results)
+	}
+}
+
+func TestFourCohortMergedLessonCreditsEveryAssignment(t *testing.T) {
+	problem := audienceScenarioProblem()
+	problem.Assignments = problem.Assignments[:4]
+	problem.DeliveryGroups = []EngineDeliveryGroup{{
+		ID: "merged-computer", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term",
+		TeacherID: "teacher-computer", SubjectID: "computer",
+		AssignmentIDs: []string{"a-computer", "b-computer", "c-computer", "d-computer"},
+		CohortIDs: []string{"g10a", "g10b", "g10c", "g10d"}, LearnerIDs: []string{"a-cs", "b-cs", "c-cs", "d-cs"},
+		WeeklyPeriods: 1, Mandatory: true, Active: true,
+	}}
+	result := Solve(problem, EngineConfig{Seed: 3, TimeBudget: time.Second, IterationBudget: 10000, Restarts: 1})
+	if !result.Validation.Valid || len(result.Placements) != 1 {
+		t.Fatalf("merged lesson should solve as one placement: status=%s validation=%+v", result.Status, result.Validation)
+	}
+	if got := len(result.Placements[0].AssignmentIDs); got != 4 {
+		t.Fatalf("merged placement credited %d assignments", got)
+	}
+}
+
+func TestParallelAlternativesArePlacedTogether(t *testing.T) {
+	problem := audienceScenarioProblem()
+	problem.DeliveryGroups = []EngineDeliveryGroup{
+		{ID: "merged-computer", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-computer", SubjectID: "computer", AssignmentIDs: []string{"a-computer", "b-computer", "c-computer", "d-computer"}, CohortIDs: []string{"g10a", "g10b", "g10c", "g10d"}, LearnerIDs: []string{"a-cs", "b-cs", "c-cs", "d-cs"}, WeeklyPeriods: 1, Mandatory: true, Active: true},
+		{ID: "arts-ab", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-arts-a", SubjectID: "arts", AssignmentIDs: []string{"a-arts", "b-arts"}, CohortIDs: []string{"g10a", "g10b"}, LearnerIDs: []string{"a-fa", "b-fa"}, WeeklyPeriods: 1, Mandatory: true, Active: true},
+		{ID: "arts-cd", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-arts-b", SubjectID: "arts", AssignmentIDs: []string{"c-arts", "d-arts"}, CohortIDs: []string{"g10c", "g10d"}, LearnerIDs: []string{"c-fa", "d-fa"}, WeeklyPeriods: 1, Mandatory: true, Active: true},
+	}
+	problem.ParallelBlocks = []EngineParallelBlock{{ID: "elective-block", WorkspaceID: "workspace", GroupIDs: []string{"merged-computer", "arts-ab", "arts-cd"}, Active: true}}
+	result := Solve(problem, EngineConfig{Seed: 5, TimeBudget: time.Second, IterationBudget: 10000, Restarts: 1})
+	if !result.Validation.Valid {
+		t.Fatalf("parallel alternatives should solve: %+v", firstFailure(result.Validation))
+	}
+	period := result.Placements[0].PeriodIDs[0]
+	for _, placement := range result.Placements {
+		if placement.ParallelBlockID != "elective-block" || placement.PeriodIDs[0] != period {
+			t.Fatalf("parallel block member not placed atomically: %+v", result.Placements)
+		}
+	}
+}
+
+func TestMixedMergedAndResidualDemand(t *testing.T) {
+	problem := audienceScenarioProblem()
+	problem.Periods = []EnginePeriod{}
+	for day := 0; day < 5; day++ {
+		for index := 0; index < 4; index++ {
+			problem.Periods = append(problem.Periods, EnginePeriod{ID: "mp" + string(rune('a'+day)) + string(rune('0'+index)), Day: day, Index: index, Teaching: true, Mandatory: true})
+		}
+	}
+	teacher := problem.Teachers["teacher-computer"]
+	teacher.WorkloadLimit = len(problem.Periods)
+	problem.Teachers["teacher-computer"] = teacher
+	problem.Assignments = problem.Assignments[:4]
+	for index := range problem.Assignments {
+		problem.Assignments[index].WeeklyPeriods = 5
+	}
+	problem.DeliveryGroups = []EngineDeliveryGroup{{
+		ID: "merged-computer", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term",
+		TeacherID: "teacher-computer", SubjectID: "computer",
+		AssignmentIDs: []string{"a-computer", "b-computer", "c-computer", "d-computer"},
+		CohortIDs: []string{"g10a", "g10b", "g10c", "g10d"}, LearnerIDs: []string{"a-cs", "b-cs", "c-cs", "d-cs"},
+		WeeklyPeriods: 2, Mandatory: true, Active: true,
+	}}
+	result := Solve(problem, EngineConfig{Seed: 7, TimeBudget: 2 * time.Second, IterationBudget: 100000, Restarts: 2})
+	if !result.Validation.Valid {
+		t.Fatalf("merged plus residual demand should solve: %+v", firstFailure(result.Validation))
+	}
+	mergedPeriods := 0
+	for _, placement := range result.Placements {
+		if placement.DeliveryGroupID == "merged-computer" {
+			mergedPeriods += len(placement.PeriodIDs)
+		}
+	}
+	if mergedPeriods != 2 {
+		t.Fatalf("expected exactly two shared merged periods, got %d", mergedPeriods)
+	}
+}
+
+func TestDoubleMergedLessonCreditsTwoPeriodsPerAssignment(t *testing.T) {
+	problem := audienceScenarioProblem()
+	problem.Assignments = problem.Assignments[:4]
+	for index := range problem.Assignments {
+		problem.Assignments[index].WeeklyPeriods = 2
+		problem.Assignments[index].DoubleBlocks = 1
+	}
+	problem.DeliveryGroups = []EngineDeliveryGroup{{
+		ID: "merged-computer", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term",
+		TeacherID: "teacher-computer", SubjectID: "computer",
+		AssignmentIDs: []string{"a-computer", "b-computer", "c-computer", "d-computer"},
+		CohortIDs: []string{"g10a", "g10b", "g10c", "g10d"}, LearnerIDs: []string{"a-cs", "b-cs", "c-cs", "d-cs"},
+		WeeklyPeriods: 2, DoubleBlocks: 1, Mandatory: true, Active: true,
+	}}
+	result := Solve(problem, EngineConfig{Seed: 11, TimeBudget: time.Second, IterationBudget: 10000, Restarts: 1})
+	if !result.Validation.Valid || len(result.Placements) != 1 || !result.Placements[0].Double {
+		t.Fatalf("double merged lesson should be one adjacent placement: %+v", result)
+	}
+}
+
+func TestCompulsorySubjectWithOneTeacherIsStaggered(t *testing.T) {
+	problem := audienceScenarioProblem()
+	problem.Assignments = []EngineAssignment{
+		{ID: "a-ict", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-ict", CohortID: "g10a", CohortSubjectID: "a-ict", SubjectID: "ict", WeeklyPeriods: 1, Mandatory: true, Active: true},
+		{ID: "b-ict", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-ict", CohortID: "g10b", CohortSubjectID: "b-ict", SubjectID: "ict", WeeklyPeriods: 1, Mandatory: true, Active: true},
+		{ID: "c-ict", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-ict", CohortID: "g10c", CohortSubjectID: "c-ict", SubjectID: "ict", WeeklyPeriods: 1, Mandatory: true, Active: true},
+		{ID: "d-ict", WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term", TeacherID: "teacher-ict", CohortID: "g10d", CohortSubjectID: "d-ict", SubjectID: "ict", WeeklyPeriods: 1, Mandatory: true, Active: true},
+	}
+	result := Solve(problem, EngineConfig{Seed: 13, TimeBudget: time.Second, IterationBudget: 10000, Restarts: 1})
+	if !result.Validation.Valid {
+		t.Fatalf("single ICT teacher should be staggered, not simultaneous: %+v", firstFailure(result.Validation))
+	}
+	seen := map[string]bool{}
+	for _, placement := range result.Placements {
+		if seen[placement.PeriodIDs[0]] {
+			t.Fatalf("teacher was double-booked in period %s: %+v", placement.PeriodIDs[0], result.Placements)
+		}
+		seen[placement.PeriodIDs[0]] = true
+	}
+}
+
 func TestSchoolWideBreakBlocksEveryCohort(t *testing.T) {
 	problem := EngineProblem{
 		WorkspaceID: "workspace", AcademicYearID: "year", TermID: "term",
